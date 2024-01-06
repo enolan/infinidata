@@ -5,13 +5,13 @@ use numpy::array::*;
 use numpy::PyUntypedArray;
 use pyo3::prelude::*;
 use pyo3::types::*;
+use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
+use rkyv::ser::Serializer;
 use rkyv::ser::serializers::{
     AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch, SharedSerializeMap,
     WriteSerializer,
 };
-use rkyv::ser::Serializer;
 use rkyv::validation::validators::{check_archived_root, DefaultValidator};
-use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
