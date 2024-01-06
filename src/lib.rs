@@ -13,18 +13,18 @@ use rkyv::ser::Serializer;
 use rkyv::validation::validators::{check_archived_root, DefaultValidator};
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 use std::fs::File;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Our top level module
 #[pymodule]
 fn infinidata(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(table_desc_from_dict, m)?)?;
-    m.add_function(wrap_pyfunction!(column_storage_from_pyarray, m)?)?;
+    m.add_class::<TableViewMem>()?;
     Ok(())
 }
 
 /// Possible types of data in a column
-#[repr(u8)]
 #[derive(Archive, Copy, Clone, Debug, Deserialize, Serialize)]
 #[archive(check_bytes)]
 #[archive_attr(derive(Debug))]
@@ -105,10 +105,55 @@ enum IndexMapping {
     },
 }
 
-#[pyfunction]
-fn table_desc_from_dict(py: Python<'_>, dict: &PyDict) -> PyResult<()> {
-    let uuid = Uuid::new_v4();
-    let mut columns = Vec::new();
+/// A TableView along with the associated in-RAM metadata
+#[pyclass(name = "TableView")]
+#[derive(Debug)]
+struct TableViewMem {
+    view: MmapArchived<TableView>,
+    desc: Arc<MmapArchived<TableDesc>>,
+    // If the IndexMapping is Storage. Storages can't be referenced by multiple views, so this
+    // doesn't need to be reference counted.
+    storage: Option<MmapArchived<TableStorage>>,
+    // OTOH TableViews *can* be referenced by multiple views, so they get Arcs.
+    concat_views: Option<Vec<Arc<MmapArchived<TableView>>>>, // If it's Concat
+    referenced_views: Option<Arc<MmapArchived<TableView>>>,  // If it's Indices or Range
+}
+
+#[pymethods]
+impl TableViewMem {
+    #[new]
+    fn new(dict: &PyDict) -> Self {
+        Python::with_gil(|py| {
+            let (desc, storage) = table_desc_and_columns_from_dict(py, dict).unwrap();
+            let view = TableView {
+                uuid: Uuid::new_v4(),
+                desc_uuid: desc.uuid,
+                index_mapping: IndexMapping::Storage(storage.uuid),
+            };
+            let path: PathBuf = format!("TableView-{}.bin", view.uuid).into();
+            let file = write_serialize(&view, &path).unwrap();
+            let view_archived = load_archived::<TableView>(file, &path).unwrap();
+            let desc = Arc::new(desc);
+            let tv = TableViewMem {
+                view: view_archived,
+                desc,
+                storage: Some(storage),
+                concat_views: None,
+                referenced_views: None,
+            };
+            println!("TableViewMem: {:?}", tv);
+            tv
+        })
+    }
+}
+
+fn table_desc_and_columns_from_dict(
+    py: Python<'_>,
+    dict: &PyDict,
+) -> PyResult<(MmapArchived<TableDesc>, MmapArchived<TableStorage>)> {
+    let column_cnt = dict.len();
+    let mut column_descs = Vec::with_capacity(column_cnt);
+    let mut column_storages = Vec::with_capacity(column_cnt);
     let mut data_len = None;
     for (key, value) in dict.iter() {
         let key = key.extract::<String>()?;
@@ -129,20 +174,38 @@ fn table_desc_from_dict(py: Python<'_>, dict: &PyDict) -> PyResult<()> {
                 }
             }
         }
-        let column = ColumnDesc {
+        let desc = ColumnDesc {
             name: key.clone(),
             dtype,
             dims: value.shape()[1..].to_vec(),
         };
-        columns.push(column);
+        column_descs.push(desc);
+        let storage = column_storage_from_pyarray(py, value)?;
+        column_storages.push(storage);
     }
-    let td = TableDesc { uuid, columns };
-    write_serialize(&td, "table_desc.bin")?;
-    let td_archived = load_archived::<TableDesc>("table_desc.bin").map_err(|err| {
+    let td_uuid = Uuid::new_v4();
+    let td = TableDesc {
+        uuid: td_uuid,
+        columns: column_descs,
+    };
+    let path: PathBuf = format!("TableDesc-{}.bin", td_uuid).into();
+    let file = write_serialize(&td, &path)?;
+    let td_archived = load_archived::<TableDesc>(file, &path).map_err(|err| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("Error loading table desc: {}", err))
     })?;
-    println!("loaded TableDesc: {:?}", *td_archived);
-    Ok(())
+
+    let ts_uuid = Uuid::new_v4();
+    let ts = TableStorage {
+        uuid: td_uuid,
+        columns: column_storages,
+    };
+    let path: PathBuf = format!("TableStorage-{}.bin", ts_uuid).into();
+    let file = write_serialize(&ts, &path)?;
+    let ts_archived = load_archived::<TableStorage>(file, &path).map_err(|err| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("Error loading table storage: {}", err))
+    })?;
+
+    Ok((td_archived, ts_archived))
 }
 
 /// Get the dtype from a numpy array
@@ -181,8 +244,7 @@ fn make_contiguous<'py>(py: Python<'py>, array: &'py PyUntypedArray) -> &'py PyU
     }
 }
 
-#[pyfunction]
-fn column_storage_from_pyarray(py: Python<'_>, array: &PyUntypedArray) -> PyResult<()> {
+fn column_storage_from_pyarray(py: Python<'_>, array: &PyUntypedArray) -> PyResult<ColumnStorage> {
     let dtype = dtype_from_pyarray(py, array)?;
     let array = make_contiguous(py, array);
     let storage = match dtype {
@@ -203,18 +265,19 @@ fn column_storage_from_pyarray(py: Python<'_>, array: &PyUntypedArray) -> PyResu
         }
         DType::FixedLengthString(_str_max_len) => {
             let total_len: usize = array.shape().iter().product();
+            // For some reason there's no Rust interface to reshape on PyUntypedArrays
             let arr = array.call_method1("reshape", (total_len,)).unwrap();
             let mut strs = Vec::with_capacity(total_len);
             for str in arr.iter().unwrap() {
                 let str = str.unwrap().extract::<String>().unwrap();
-                println!("str: {:?}", str);
                 strs.push(str);
             }
+            assert_eq!(strs.len(), total_len);
             ColumnStorage::FixedLengthString(strs)
         }
     };
-    println!("storage from array: {:?}", storage);
-    Ok(())
+    println!("storage from array: {:?}", &storage);
+    Ok(storage)
 }
 
 type FileSerializer = CompositeSerializer<
@@ -224,7 +287,7 @@ type FileSerializer = CompositeSerializer<
 >;
 
 /// Write a Serialize type to a file
-fn write_serialize<T>(data: &T, path: &str) -> Result<(), std::io::Error>
+fn write_serialize<T>(data: &T, path: &Path) -> Result<File, std::io::Error>
 where
     T: Serialize<FileSerializer>,
 {
@@ -239,15 +302,24 @@ where
     ser.serialize_value(data).map_or_else(
         |e| Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
         |_| Ok(()),
-    )
+    )?;
+    // file was moved into ser, so we need to move it back out
+    let file = ser.into_components().0.into_inner();
+    let mut perms = file.metadata()?.permissions();
+    perms.set_readonly(true);
+    file.set_permissions(perms)?;
+    Ok(file)
 }
 
 mod mmap_archived {
     use super::*;
 
     /// An mmapped archived type that has been checked for validity.
+    #[derive(Debug)]
     pub struct MmapArchived<T> {
         mmap: Mmap,
+        fname: PathBuf,
+        delete_on_drop: bool,
         _phantom: std::marker::PhantomData<T>,
     }
 
@@ -256,11 +328,15 @@ mod mmap_archived {
         T: Archive,
         for<'a> T::Archived: CheckBytes<DefaultValidator<'a>>,
     {
-        pub fn new(mmap: Mmap) -> Result<Self, String> {
+        pub fn new(file: File, fname: &Path, delete_on_drop: bool) -> Result<Self, String> {
+            let fname = fname
+                .canonicalize()
+                .map_err(|e| format!("Error canonicalizing path: {}", e))?;
+            let mmap =
+                unsafe { Mmap::map(&file).map_err(|e| format!("Error mmaping file: {}", e))? };
             // There are situations where skipping the check is valid, if profiling shows it
             // matters, we can add an unsafe function to skip the check.
-            let buf = &mmap[..];
-            let check_res = check_archived_root::<T>(buf);
+            let check_res = check_archived_root::<T>(&mmap[..]);
             match check_res {
                 Ok(_) => {
                     // The result has a reference to the buffer, so we need to drop it before we
@@ -268,6 +344,8 @@ mod mmap_archived {
                     drop(check_res);
                     Ok(MmapArchived {
                         mmap,
+                        fname,
+                        delete_on_drop,
                         _phantom: std::marker::PhantomData,
                     })
                 }
@@ -282,22 +360,30 @@ mod mmap_archived {
     {
         type Target = T::Archived;
 
-        #[inline]
+        #[inline(always)]
         fn deref(&self) -> &Self::Target {
-            let buf = &self.mmap[..];
-            unsafe { rkyv::archived_root::<T>(buf) }
+            unsafe { rkyv::archived_root::<T>(&self.mmap[..]) }
+        }
+    }
+
+    impl<T> Drop for MmapArchived<T> {
+        fn drop(&mut self) {
+            if self.delete_on_drop {
+                match std::fs::remove_file(&self.fname) {
+                    Ok(_) => (),
+                    Err(e) => println!("Warning: error deleting file {:?}: {}", &self.fname, e),
+                }
+            }
         }
     }
 }
 use mmap_archived::*;
 
 /// Load an archived type from a file with mmap
-fn load_archived<T>(path: &str) -> Result<MmapArchived<T>, String>
+fn load_archived<T>(file: File, path: &Path) -> Result<MmapArchived<T>, String>
 where
     T: Archive,
     for<'a> T::Archived: CheckBytes<DefaultValidator<'a>>,
 {
-    let file = File::open(path).map_err(|e| format!("Error opening file: {}", e))?;
-    let mmap = unsafe { Mmap::map(&file).map_err(|e| format!("Error mmaping file: {}", e))? };
-    MmapArchived::new(mmap)
+    MmapArchived::new(file, path, true)
 }
