@@ -3,15 +3,16 @@ use memmap::Mmap;
 use numpy as np;
 use numpy::array::*;
 use numpy::PyUntypedArray;
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::*;
-use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
-use rkyv::ser::Serializer;
 use rkyv::ser::serializers::{
     AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch, SharedSerializeMap,
     WriteSerializer,
 };
+use rkyv::ser::Serializer;
 use rkyv::validation::validators::{check_archived_root, DefaultValidator};
+use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -117,32 +118,133 @@ struct TableViewMem {
     // OTOH TableViews *can* be referenced by multiple views, so they get Arcs.
     concat_views: Option<Vec<Arc<MmapArchived<TableView>>>>, // If it's Concat
     referenced_views: Option<Arc<MmapArchived<TableView>>>,  // If it's Indices or Range
+    /// Columns that we're looking at - it's possible to ignore columns. For now this is a purely
+    /// runtime effect and ignoring a column doesn't cause the column to be removed from the
+    /// storage. Mostly you want to ignore columns to save disk I/O, not disk space.
+    live_columns: Vec<usize>,
 }
 
 #[pymethods]
 impl TableViewMem {
     #[new]
     fn new(dict: &PyDict) -> Self {
+        let py = dict.py();
+        let (desc, storage) = table_desc_and_columns_from_dict(py, dict).unwrap();
+        let view = TableView {
+            uuid: Uuid::new_v4(),
+            desc_uuid: desc.uuid,
+            index_mapping: IndexMapping::Storage(storage.uuid),
+        };
+        let path: PathBuf = format!("TableView-{}.bin", view.uuid).into();
+        let file = write_serialize(&view, &path).unwrap();
+        let view_archived = load_archived::<TableView>(file, &path).unwrap();
+        let ncols = desc.columns.len();
+        let tv = TableViewMem {
+            view: view_archived,
+            desc: Arc::new(desc),
+            storage: Some(storage),
+            concat_views: None,
+            referenced_views: None,
+            live_columns: (0..ncols).collect(),
+        };
+        println!("TableViewMem: {:?}", tv);
+        tv
+    }
+
+    #[pyo3(name = "__getitem__")]
+    fn get_item(&self, index: &PyAny) -> PyResult<Py<PyDict>> {
+        let column_descs: Vec<(usize, &ArchivedColumnDesc)> = self
+            .live_columns
+            .iter()
+            .map(|&col| (col, &self.desc.columns[col]))
+            .collect();
+        let py = index.py();
+        if let Ok(index) = index.extract::<usize>() {
+            let out = PyDict::new(py);
+            for (col, col_desc) in column_descs {
+                let col_name = col_desc.name.to_string();
+                match self.get_column_at_idx(col, index) {
+                    IndexingResult::Scalar(scalar) => out.set_item(col_name, scalar)?,
+                    IndexingResult::Array(array) => out.set_item(col_name, array)?,
+                }
+            }
+            Ok(out.into())
+        } else if let Ok(slice) = index.downcast::<PySlice>() {
+            todo!("get_item slice {slice}")
+        } else if let Ok(idx_array) = index.downcast::<PyArray1<i64>>() {
+            todo!("get_item array {idx_array}")
+        } else {
+            Err(pyo3::exceptions::PyTypeError::new_err(
+                "Index must be an integer, slice, or NumPy array of integers",
+            ))
+        }
+    }
+}
+
+enum IndexingResult {
+    Scalar(Py<PyAny>),         // native python int, float, or str
+    Array(Py<PyUntypedArray>), // numpy array
+}
+
+impl TableViewMem {
+    /// Get the values for a column at a given index
+    fn get_column_at_idx(&self, col: usize, idx: usize) -> IndexingResult {
+        let col_desc = &self.desc.columns[col];
         Python::with_gil(|py| {
-            let (desc, storage) = table_desc_and_columns_from_dict(py, dict).unwrap();
-            let view = TableView {
-                uuid: Uuid::new_v4(),
-                desc_uuid: desc.uuid,
-                index_mapping: IndexMapping::Storage(storage.uuid),
+            let arr: &PyUntypedArray = match &self.view.index_mapping {
+                ArchivedIndexMapping::Storage(_storage_uuid) => {
+                    let storage = self
+                        .storage
+                        .as_ref()
+                        .expect("storage not set when IndexMapping is Storage");
+                    let col_storage = &storage.columns[col];
+                    let dims_product: usize = col_desc.dims.iter().product::<u64>() as usize;
+                    let start = idx * dims_product; // TODO use Result and throw if index is out of bounds
+                    let end = start + dims_product;
+                    match col_storage {
+                        ArchivedColumnStorage::F32(data) => {
+                            np::PyArray::from_slice(py, &data[start..end]).as_untyped()
+                        }
+                        ArchivedColumnStorage::I32(data) => {
+                            np::PyArray::from_slice(py, &data[start..end]).as_untyped()
+                        }
+                        ArchivedColumnStorage::I64(data) => {
+                            np::PyArray::from_slice(py, &data[start..end]).as_untyped()
+                        }
+                        ArchivedColumnStorage::FixedLengthString(data) => {
+                            let data = (&data[start..end]).iter().map(|s| s.to_string());
+                            // Rust-numpy doesn't support strings, so we go via Python. This is
+                            // real inefficient, but hopefully not on the critical path?
+                            let string_list = PyList::new(py, data);
+                            let np = py.import(intern!(py, "numpy")).unwrap();
+                            let fun = np.getattr(intern!(py, "array")).unwrap();
+                            fun.call1((string_list,)).unwrap().downcast().unwrap()
+                        }
+                    }
+                }
+                ArchivedIndexMapping::Concat(_views) => todo!(),
+                ArchivedIndexMapping::Indices(_view_uuid, _indices) => todo!(),
+                ArchivedIndexMapping::Range {
+                    table_uuid,
+                    start,
+                    end,
+                    step,
+                } => todo!(),
             };
-            let path: PathBuf = format!("TableView-{}.bin", view.uuid).into();
-            let file = write_serialize(&view, &path).unwrap();
-            let view_archived = load_archived::<TableView>(file, &path).unwrap();
-            let desc = Arc::new(desc);
-            let tv = TableViewMem {
-                view: view_archived,
-                desc,
-                storage: Some(storage),
-                concat_views: None,
-                referenced_views: None,
-            };
-            println!("TableViewMem: {:?}", tv);
-            tv
+            let dims: &[u64] = &col_desc.dims;
+            if dims.len() == 0 {
+                // Like reshape, indexing doesn't exist on PyUntypedArray, so we have to go via
+                // Python
+                IndexingResult::Scalar(arr.get_item(0).unwrap().into_py(py))
+            } else {
+                // This conversion is actually a NOP but oh well
+                let dims: &[usize] = &dims.iter().map(|&d| d as usize).collect::<Vec<usize>>();
+                IndexingResult::Array(
+                    reshape_pyuntypedarray(py, arr, dims)
+                        .expect("reshape back to original dims failed")
+                        .into_py(py),
+                )
+            }
         })
     }
 }
@@ -236,8 +338,8 @@ fn make_contiguous<'py>(py: Python<'py>, array: &'py PyUntypedArray) -> &'py PyU
     if array.is_c_contiguous() {
         array
     } else {
-        let np = py.import("numpy").unwrap();
-        let fun = np.getattr("ascontiguousarray").unwrap();
+        let np = py.import(intern!(py, "numpy")).unwrap();
+        let fun = np.getattr(intern!(py, "ascontiguousarray")).unwrap();
         let contiguous_array = fun.call1((array,)).unwrap();
         let contiguous_array = contiguous_array.downcast::<PyUntypedArray>().unwrap();
         contiguous_array
@@ -265,8 +367,8 @@ fn column_storage_from_pyarray(py: Python<'_>, array: &PyUntypedArray) -> PyResu
         }
         DType::FixedLengthString(_str_max_len) => {
             let total_len: usize = array.shape().iter().product();
-            // For some reason there's no Rust interface to reshape on PyUntypedArrays
-            let arr = array.call_method1("reshape", (total_len,)).unwrap();
+            let arr =
+                reshape_pyuntypedarray(py, array, &[total_len]).expect("reshape to flat failed");
             let mut strs = Vec::with_capacity(total_len);
             for str in arr.iter().unwrap() {
                 let str = str.unwrap().extract::<String>().unwrap();
@@ -278,6 +380,20 @@ fn column_storage_from_pyarray(py: Python<'_>, array: &PyUntypedArray) -> PyResu
     };
     println!("storage from array: {:?}", &storage);
     Ok(storage)
+}
+
+// For some reason there's no Rust interface to reshape on PyUntypedArrays, so we have to go via
+// Python
+fn reshape_pyuntypedarray<'py>(
+    py: Python<'py>,
+    array: &'py PyUntypedArray,
+    shape: &[usize],
+) -> PyResult<&'py PyUntypedArray> {
+    let shape: &'py PyTuple = PyTuple::new(py, shape);
+    let array = array.call_method1(intern!(py, "reshape"), shape)?;
+    Ok(array
+        .downcast::<PyUntypedArray>()
+        .expect("reshape didn't return an array"))
 }
 
 type FileSerializer = CompositeSerializer<
