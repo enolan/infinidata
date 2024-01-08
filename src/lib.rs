@@ -28,7 +28,7 @@ fn infinidata(_py: Python, m: &PyModule) -> PyResult<()> {
 /// Possible types of data in a column
 #[derive(Archive, Copy, Clone, Debug, Deserialize, Serialize)]
 #[archive(check_bytes)]
-#[archive_attr(derive(Debug))]
+#[archive_attr(derive(Debug, Eq, PartialEq))]
 enum DType {
     F32,
     I32,
@@ -39,7 +39,7 @@ enum DType {
 /// Column definition
 #[derive(Archive, Clone, Debug, Deserialize, Serialize)]
 #[archive(check_bytes)]
-#[archive_attr(derive(Debug))]
+#[archive_attr(derive(Debug, Eq, PartialEq))]
 struct ColumnDesc {
     name: String,
     dtype: DType,
@@ -106,18 +106,16 @@ enum IndexMapping {
     },
 }
 
-/// A TableView along with the associated in-RAM metadata
+/// A TableView along with the associated in-RAM metadata. This is mostly a collection of Arcs,
+/// along with a little runtime data.
 #[pyclass(name = "TableView")]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct TableViewMem {
-    view: MmapArchived<TableView>,
+    view: Arc<MmapArchived<TableView>>,
     desc: Arc<MmapArchived<TableDesc>>,
-    // If the IndexMapping is Storage. Storages can't be referenced by multiple views, so this
-    // doesn't need to be reference counted.
-    storage: Option<MmapArchived<TableStorage>>,
-    // OTOH TableViews *can* be referenced by multiple views, so they get Arcs.
-    concat_views: Option<Vec<Arc<MmapArchived<TableView>>>>, // If it's Concat
-    referenced_views: Option<Arc<MmapArchived<TableView>>>,  // If it's Indices or Range
+    storage: Option<Arc<MmapArchived<TableStorage>>>, // If the IndexMapping is Storage
+    concat_views: Option<(Vec<TableViewMem>, Vec<usize>)>, // If it's Concat
+    referenced_view: Option<Box<TableViewMem>>,       // If it's Indices or Range
     /// Columns that we're looking at - it's possible to ignore columns. For now this is a purely
     /// runtime effect and ignoring a column doesn't cause the column to be removed from the
     /// storage. Mostly you want to ignore columns to save disk I/O, not disk space.
@@ -129,7 +127,7 @@ impl TableViewMem {
     #[new]
     fn new(dict: &PyDict) -> Self {
         let py = dict.py();
-        let (desc, storage) = table_desc_and_columns_from_dict(py, dict).unwrap();
+        let (desc, storage) = table_desc_and_columns_from_dict(py, dict).unwrap(); // FIXME result
         let view = TableView {
             uuid: Uuid::new_v4(),
             desc_uuid: desc.uuid,
@@ -140,11 +138,11 @@ impl TableViewMem {
         let view_archived = load_archived::<TableView>(file, &path).unwrap();
         let ncols = desc.columns.len();
         let tv = TableViewMem {
-            view: view_archived,
+            view: Arc::new(view_archived),
             desc: Arc::new(desc),
-            storage: Some(storage),
+            storage: Some(Arc::new(storage)),
             concat_views: None,
-            referenced_views: None,
+            referenced_view: None,
             live_columns: (0..ncols).collect(),
         };
         println!("TableViewMem: {:?}", tv);
@@ -159,8 +157,8 @@ impl TableViewMem {
             .map(|&col| (col, &self.desc.columns[col]))
             .collect();
         let py = index.py();
+        let out = PyDict::new(py);
         if let Ok(index) = index.extract::<usize>() {
-            let out = PyDict::new(py);
             for (col, col_desc) in column_descs {
                 let col_name = col_desc.name.to_string();
                 match self.get_column_at_idx(col, index) {
@@ -170,7 +168,12 @@ impl TableViewMem {
             }
             Ok(out.into())
         } else if let Ok(slice) = index.downcast::<PySlice>() {
-            todo!("get_item slice {slice}")
+            for (col, col_desc) in column_descs {
+                let col_name = col_desc.name.to_string();
+                out.set_item(col_name, self.get_column_range(col, slice)?)
+                    .unwrap();
+            }
+            Ok(out.into())
         } else if let Ok(idx_array) = index.downcast::<PyArray1<i64>>() {
             todo!("get_item array {idx_array}")
         } else {
@@ -178,6 +181,98 @@ impl TableViewMem {
                 "Index must be an integer, slice, or NumPy array of integers",
             ))
         }
+    }
+
+    #[pyo3(name = "__len__")]
+    fn len(&self) -> usize {
+        match &self.view.index_mapping {
+            ArchivedIndexMapping::Storage(_storage_uuid) => {
+                let storage = self
+                    .storage
+                    .as_ref()
+                    .expect("storage not set when IndexMapping is Storage");
+                let col_storage = &storage.columns[0];
+                let dims_product: usize =
+                    self.desc.columns[0].dims.iter().product::<u64>() as usize;
+                let elem_len = match col_storage {
+                    ArchivedColumnStorage::F32(data) => data.len(),
+                    ArchivedColumnStorage::I32(data) => data.len(),
+                    ArchivedColumnStorage::I64(data) => data.len(),
+                    ArchivedColumnStorage::FixedLengthString(data) => data.len(),
+                };
+                elem_len / dims_product
+            }
+            ArchivedIndexMapping::Concat(_views) => {
+                let (_concat_views, cum_lengths) = self
+                    .concat_views
+                    .as_ref()
+                    .expect("concat_views not set when IndexMapping is Concat");
+                *cum_lengths.last().unwrap()
+            }
+            ArchivedIndexMapping::Indices(_view_uuid, _indices) => {
+                todo!("len for direct indices mapping")
+            }
+            ArchivedIndexMapping::Range {
+                table_uuid: _,
+                start: _,
+                end: _,
+                step: _,
+            } => todo!("range len"),
+        }
+    }
+
+    fn uuid(&self) -> String {
+        self.view.uuid.to_string()
+    }
+
+    /// Concatenate multiple TableViews together
+    #[staticmethod]
+    fn concat(views: &PyList) -> PyResult<Self> {
+        if views.len() == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Must pass at least one view to concat",
+            ));
+        }
+        let mut concat_views: Vec<TableViewMem> = Vec::with_capacity(views.len());
+        let mut view_lens: Vec<usize> = Vec::with_capacity(views.len());
+        let all_desc: &ArchivedTableDesc = &views[0].extract::<PyRef<Self>>()?.desc;
+        for (i, view) in views.iter().enumerate() {
+            let view = view.extract::<PyRef<Self>>()?;
+            view_lens.push(view.len());
+            if i != 0 {
+                if view.desc.columns != all_desc.columns {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "All views must have the same column definitions",
+                    ));
+                }
+            }
+            concat_views.push(view.clone());
+        }
+        let table_view = TableView {
+            uuid: Uuid::new_v4(),
+            desc_uuid: all_desc.uuid,
+            index_mapping: IndexMapping::Concat(concat_views.iter().map(|v| v.view.uuid).collect()),
+        };
+
+        // Compute cumulative lengths of the constituent views
+        let mut cum_lengths = Vec::with_capacity(concat_views.len());
+        let mut cum_length = 0;
+        for len in &view_lens {
+            cum_length += len;
+            cum_lengths.push(cum_length);
+        }
+
+        let path: PathBuf = format!("TableView-{}.bin", table_view.uuid).into();
+        let file = write_serialize(&table_view, &path).unwrap();
+        let table_view_archived = load_archived::<TableView>(file, &path).unwrap();
+        Ok(TableViewMem {
+            view: Arc::new(table_view_archived),
+            desc: Arc::clone(&views[0].extract::<PyRef<Self>>()?.desc),
+            storage: None,
+            concat_views: Some((concat_views, cum_lengths)),
+            referenced_view: None,
+            live_columns: (0..all_desc.columns.len()).collect(),
+        })
     }
 }
 
@@ -222,7 +317,15 @@ impl TableViewMem {
                         }
                     }
                 }
-                ArchivedIndexMapping::Concat(_views) => todo!(),
+                ArchivedIndexMapping::Concat(_view_uuids) => {
+                    let (subview_idx, inner_idx) = self.get_subview_and_idx(idx).unwrap();
+                    let subview: &TableViewMem = &self
+                        .concat_views
+                        .as_ref()
+                        .expect("concat_views not set when IndexMapping is Concat")
+                        .0[subview_idx];
+                    return subview.get_column_at_idx(col, inner_idx);
+                }
                 ArchivedIndexMapping::Indices(_view_uuid, _indices) => todo!(),
                 ArchivedIndexMapping::Range {
                     table_uuid,
@@ -246,6 +349,51 @@ impl TableViewMem {
                 )
             }
         })
+    }
+
+    fn get_column_range(&self, _col: usize, _slice: &PySlice) -> PyResult<PyUntypedArray> {
+        todo!("get_column_range")
+    }
+
+    /// For views with Concat IndexMappings, find the index of the sub-view and the index within
+    /// that sub-view that contain a given index in the outer view.
+    fn get_subview_and_idx(&self, idx: usize) -> PyResult<(usize, usize)> {
+        match &self.view.index_mapping {
+            ArchivedIndexMapping::Concat(_views) => (),
+            _ => panic!("get_subview_and_idx called on non-concat view"),
+        }
+        let (concat_views, cum_lengths) = self
+            .concat_views
+            .as_ref()
+            .expect("concat_views not set when IndexMapping is Concat");
+        assert_eq!(concat_views.len(), cum_lengths.len());
+
+        if idx >= *cum_lengths.last().unwrap() {
+            return Err(pyo3::exceptions::PyIndexError::new_err(
+                "Index out of bounds",
+            ));
+        }
+        // Find the sub-view by binary search. We want to find the first sub-view whose cumulative
+        // length is greater than the index.
+        let mut low = 0;
+        let mut high = concat_views.len() - 1;
+        while low < high {
+            let mid = (low + high) / 2;
+            if cum_lengths[mid] <= idx {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        assert_eq!(low, high);
+        let subview_idx = low;
+        let inner_idx = if subview_idx == 0 {
+            idx
+        } else {
+            idx - cum_lengths[subview_idx - 1]
+        };
+
+        Ok((subview_idx, inner_idx))
     }
 }
 
