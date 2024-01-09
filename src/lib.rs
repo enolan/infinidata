@@ -228,7 +228,7 @@ impl TableViewMem {
     /// Concatenate multiple TableViews together
     #[staticmethod]
     fn concat(views: &PyList) -> PyResult<Self> {
-        if views.len() == 0 {
+        if views.is_empty() {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "Must pass at least one view to concat",
             ));
@@ -239,12 +239,10 @@ impl TableViewMem {
         for (i, view) in views.iter().enumerate() {
             let view = view.extract::<PyRef<Self>>()?;
             view_lens.push(view.len());
-            if i != 0 {
-                if view.desc.columns != all_desc.columns {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "All views must have the same column definitions",
-                    ));
-                }
+            if i != 0 && view.desc.columns != all_desc.columns {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "All views must have the same column definitions",
+                ));
             }
             concat_views.push(view.clone());
         }
@@ -307,7 +305,7 @@ impl TableViewMem {
                             np::PyArray::from_slice(py, &data[start..end]).as_untyped()
                         }
                         ArchivedColumnStorage::FixedLengthString(data) => {
-                            let data = (&data[start..end]).iter().map(|s| s.to_string());
+                            let data = data[start..end].iter().map(|s| s.to_string());
                             // Rust-numpy doesn't support strings, so we go via Python. This is
                             // real inefficient, but hopefully not on the critical path?
                             let string_list = PyList::new(py, data);
@@ -328,14 +326,14 @@ impl TableViewMem {
                 }
                 ArchivedIndexMapping::Indices(_view_uuid, _indices) => todo!(),
                 ArchivedIndexMapping::Range {
-                    table_uuid,
-                    start,
-                    end,
-                    step,
+                    table_uuid: _,
+                    start: _,
+                    end: _,
+                    step: _,
                 } => todo!(),
             };
             let dims: &[u64] = &col_desc.dims;
-            if dims.len() == 0 {
+            if dims.is_empty() {
                 // Like reshape, indexing doesn't exist on PyUntypedArray, so we have to go via
                 // Python
                 IndexingResult::Scalar(arr.get_item(0).unwrap().into_py(py))
@@ -409,7 +407,7 @@ fn table_desc_and_columns_from_dict(
         let key = key.extract::<String>()?;
         let value = value.downcast::<PyUntypedArray>()?;
         let dtype = dtype_from_pyarray(py, value)?;
-        if value.shape().len() < 1 {
+        if value.shape().is_empty() {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "Unsupported shape, must be at least 1D",
             ));
@@ -470,7 +468,7 @@ fn dtype_from_pyarray(py: Python<'_>, array: &PyUntypedArray) -> PyResult<DType>
     } else {
         let kind = dtype_py.kind();
         if kind == b'U' {
-            let length = dtype_py.itemsize() as usize / 4;
+            let length = dtype_py.itemsize() / 4;
             Ok(DType::FixedLengthString(length))
         } else {
             Err(pyo3::exceptions::PyValueError::new_err(format!(
