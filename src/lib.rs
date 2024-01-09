@@ -174,12 +174,13 @@ impl TableViewMem {
             Ok(out.into())
         } else if let Ok(slice) = index.downcast::<PySlice>() {
             let slice_idxs = slice.indices(self.len() as i64)?;
+            println!("slice_idxs: {:?}", slice_idxs);
             // This has the Python semantics where getting a slice is never out of bounds, even if
             // your bounds go past the end of the array. You do get an exception if you try to
             // specify a step size of 0 though.
             for (col, col_desc) in column_descs {
                 let col_name = col_desc.name.to_string();
-                out.set_item(col_name, self.get_column_range(col, &slice_idxs)?)
+                out.set_item(col_name, self.get_column_range(col, &slice_idxs))
                     .unwrap();
             }
             Ok(out.into())
@@ -358,8 +359,108 @@ impl TableViewMem {
         })
     }
 
-    fn get_column_range(&self, _col: usize, _slice: &PySliceIndices) -> PyResult<PyUntypedArray> {
-        todo!("get_column_range")
+    /// Get a range of a column.
+    fn get_column_range(&self, col: usize, slice: &PySliceIndices) -> Py<PyUntypedArray> {
+        Python::with_gil(|py| {
+            if slice.slicelength == 0 {
+                let out: &PyArray1<u8> = PyArray1::from_slice(py, &[]);
+                return out.as_untyped().into_py(py);
+            }
+            let mut out_shape = Vec::with_capacity(self.desc.columns[col].dims.len() + 1);
+            out_shape.push(slice.slicelength as usize);
+            out_shape.extend(self.desc.columns[col].dims.iter().map(|&d| d as usize));
+
+            if slice.step == 1 {
+                // In this case we can do an actual slice of the underlying array
+                match &self.view.index_mapping {
+                    ArchivedIndexMapping::Storage(_storage_uuid) => {
+                        let storage = self
+                            .storage
+                            .as_ref()
+                            .expect("storage not set when IndexMapping is Storage");
+                        let dims_product: usize =
+                            self.desc.columns[col].dims.iter().product::<u64>() as usize;
+                        let start_inner_idx = slice.start as usize * dims_product;
+                        let end_inner_idx = slice.stop as usize * dims_product;
+                        let col_storage = &storage.columns[col];
+                        let arr: &PyUntypedArray = match col_storage {
+                            ArchivedColumnStorage::F32(data) => {
+                                np::PyArray::from_slice(py, &data[start_inner_idx..end_inner_idx])
+                                    .as_untyped()
+                            }
+                            ArchivedColumnStorage::I32(data) => {
+                                np::PyArray::from_slice(py, &data[start_inner_idx..end_inner_idx])
+                                    .as_untyped()
+                            }
+                            ArchivedColumnStorage::I64(data) => {
+                                np::PyArray::from_slice(py, &data[start_inner_idx..end_inner_idx])
+                                    .as_untyped()
+                            }
+                            ArchivedColumnStorage::UString(data) => {
+                                let data = data[start_inner_idx..end_inner_idx]
+                                    .iter()
+                                    .map(|s| s.to_string());
+                                // Rust-numpy doesn't support strings, so we go via Python. This is
+                                // real inefficient, but hopefully not on the critical path?
+                                let string_list = PyList::new(py, data);
+                                let np = py.import(intern!(py, "numpy")).unwrap();
+                                let fun = np.getattr(intern!(py, "array")).unwrap();
+                                fun.call1((string_list,)).unwrap().downcast().unwrap()
+                            }
+                        };
+                        assert_eq!(dims_product * slice.slicelength as usize, arr.len());
+                        return reshape_pyuntypedarray(py, arr, &out_shape)
+                            .expect("reshape back to original dims failed")
+                            .into_py(py);
+                    }
+                    ArchivedIndexMapping::Concat(_view_uuids) => {
+                        let (start_subview_idx, start_inner_idx) =
+                            self.get_subview_and_idx(slice.start as usize).unwrap();
+                        let (end_subview_idx, end_inner_idx) =
+                            self.get_subview_and_idx((slice.stop - 1) as usize).unwrap();
+                        let end_inner_idx = end_inner_idx + 1;
+                        let subviews_to_use = &self
+                            .concat_views
+                            .as_ref()
+                            .expect("concat_views not set when IndexMapping is Concat")
+                            .0[start_subview_idx..=end_subview_idx];
+                        let mut inner_ranges = Vec::with_capacity(subviews_to_use.len());
+                        if start_subview_idx == end_subview_idx {
+                            inner_ranges = vec![(start_inner_idx, end_inner_idx)];
+                        } else {
+                            inner_ranges.push((start_inner_idx, subviews_to_use[0].len()));
+                            for subview in &subviews_to_use[1..subviews_to_use.len() - 1] {
+                                inner_ranges.push((0, subview.len()));
+                            }
+                            inner_ranges.push((0, end_inner_idx));
+                        }
+                        let arrs = inner_ranges
+                            .iter()
+                            .zip(subviews_to_use)
+                            .map(|((start, end), subview)| {
+                                subview
+                                    .get_column_range(
+                                        col,
+                                        &PySliceIndices {
+                                            start: *start as isize,
+                                            stop: *end as isize,
+                                            step: 1,
+                                            slicelength: (*end - *start) as isize,
+                                        },
+                                    )
+                                    .into_ref(py)
+                            })
+                            .collect::<Vec<&PyUntypedArray>>();
+                        let arr = concat_pyuntypedarrays(py, arrs).unwrap();
+                        return arr.into_py(py);
+                    }
+                    _ => todo!("get_column_range for non-Storage"),
+                }
+            } else {
+                // In this case we generate an array of indices
+                todo!()
+            }
+        })
     }
 
     /// For views with Concat IndexMappings, find the index of the sub-view and the index within
@@ -552,6 +653,19 @@ fn reshape_pyuntypedarray<'py>(
     Ok(array
         .downcast::<PyUntypedArray>()
         .expect("reshape didn't return an array"))
+}
+
+fn concat_pyuntypedarrays<'py>(
+    py: Python<'py>,
+    arrays: Vec<&'py PyUntypedArray>,
+) -> PyResult<&'py PyUntypedArray> {
+    let arrays = PyList::new(py, arrays);
+    let module = py.import(intern!(py, "numpy")).unwrap();
+    let fun = module.getattr(intern!(py, "concatenate")).unwrap();
+    let out = fun.call1((arrays,))?;
+    Ok(out
+        .downcast::<PyUntypedArray>()
+        .expect("concatenate didn't return an array"))
 }
 
 type FileSerializer = CompositeSerializer<
