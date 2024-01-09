@@ -33,7 +33,7 @@ enum DType {
     F32,
     I32,
     I64,
-    FixedLengthString(usize),
+    UString,
 }
 
 /// Column definition
@@ -63,7 +63,7 @@ enum ColumnStorage {
     F32(Vec<f32>),
     I32(Vec<i32>),
     I64(Vec<i64>),
-    FixedLengthString(Vec<String>),
+    UString(Vec<String>),
 }
 
 /// Concrete backing storage for a whole table
@@ -198,7 +198,7 @@ impl TableViewMem {
                     ArchivedColumnStorage::F32(data) => data.len(),
                     ArchivedColumnStorage::I32(data) => data.len(),
                     ArchivedColumnStorage::I64(data) => data.len(),
-                    ArchivedColumnStorage::FixedLengthString(data) => data.len(),
+                    ArchivedColumnStorage::UString(data) => data.len(),
                 };
                 elem_len / dims_product
             }
@@ -304,7 +304,7 @@ impl TableViewMem {
                         ArchivedColumnStorage::I64(data) => {
                             np::PyArray::from_slice(py, &data[start..end]).as_untyped()
                         }
-                        ArchivedColumnStorage::FixedLengthString(data) => {
+                        ArchivedColumnStorage::UString(data) => {
                             let data = data[start..end].iter().map(|s| s.to_string());
                             // Rust-numpy doesn't support strings, so we go via Python. This is
                             // real inefficient, but hopefully not on the critical path?
@@ -468,8 +468,11 @@ fn dtype_from_pyarray(py: Python<'_>, array: &PyUntypedArray) -> PyResult<DType>
     } else {
         let kind = dtype_py.kind();
         if kind == b'U' {
-            let length = dtype_py.itemsize() / 4;
-            Ok(DType::FixedLengthString(length))
+            // NumPy arrays of strings are packed arrays of UCS4 codepoints with a maximum size.
+            // it's not well supported in rust-numpy, and I think the perf difference is probably
+            // irrelevant, so we convert to String and use a Vec<String> instead.
+            let _str_max_len = dtype_py.itemsize() / 4;
+            Ok(DType::UString)
         } else {
             Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "Unsupported dtype {:?}",
@@ -511,17 +514,17 @@ fn column_storage_from_pyarray(py: Python<'_>, array: &PyUntypedArray) -> PyResu
             let data = arr.to_vec().unwrap();
             ColumnStorage::I64(data)
         }
-        DType::FixedLengthString(_str_max_len) => {
+        DType::UString => {
             let total_len: usize = array.shape().iter().product();
             let arr =
                 reshape_pyuntypedarray(py, array, &[total_len]).expect("reshape to flat failed");
             let mut strs = Vec::with_capacity(total_len);
             for str in arr.iter().unwrap() {
-                let str = str.unwrap().extract::<String>().unwrap();
+                let str = str.unwrap().extract::<String>()?;
                 strs.push(str);
             }
             assert_eq!(strs.len(), total_len);
-            ColumnStorage::FixedLengthString(strs)
+            ColumnStorage::UString(strs)
         }
     };
     println!("storage from array: {:?}", &storage);
