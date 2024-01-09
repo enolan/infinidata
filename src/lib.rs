@@ -159,6 +159,11 @@ impl TableViewMem {
         let py = index.py();
         let out = PyDict::new(py);
         if let Ok(index) = index.extract::<usize>() {
+            if index >= self.len() {
+                return Err(pyo3::exceptions::PyIndexError::new_err(
+                    "Index out of bounds",
+                ));
+            }
             for (col, col_desc) in column_descs {
                 let col_name = col_desc.name.to_string();
                 match self.get_column_at_idx(col, index) {
@@ -168,9 +173,13 @@ impl TableViewMem {
             }
             Ok(out.into())
         } else if let Ok(slice) = index.downcast::<PySlice>() {
+            let slice_idxs = slice.indices(self.len() as i64)?;
+            // This has the Python semantics where getting a slice is never out of bounds, even if
+            // your bounds go past the end of the array. You do get an exception if you try to
+            // specify a step size of 0 though.
             for (col, col_desc) in column_descs {
                 let col_name = col_desc.name.to_string();
-                out.set_item(col_name, self.get_column_range(col, slice)?)
+                out.set_item(col_name, self.get_column_range(col, &slice_idxs)?)
                     .unwrap();
             }
             Ok(out.into())
@@ -349,7 +358,7 @@ impl TableViewMem {
         })
     }
 
-    fn get_column_range(&self, _col: usize, _slice: &PySlice) -> PyResult<PyUntypedArray> {
+    fn get_column_range(&self, _col: usize, _slice: &PySliceIndices) -> PyResult<PyUntypedArray> {
         todo!("get_column_range")
     }
 
