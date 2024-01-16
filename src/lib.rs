@@ -13,6 +13,7 @@ use rkyv::ser::serializers::{
 use rkyv::ser::Serializer;
 use rkyv::validation::validators::{check_archived_root, DefaultValidator};
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -371,9 +372,10 @@ impl TableViewMem {
             out_shape.extend(self.desc.columns[col].dims.iter().map(|&d| d as usize));
 
             if slice.step == 1 {
-                // In this case we can do an actual slice of the underlying array
+                // In this case the range is contiguous
                 match &self.view.index_mapping {
                     ArchivedIndexMapping::Storage(_storage_uuid) => {
+                        // Slice the underlying storage
                         let storage = self
                             .storage
                             .as_ref()
@@ -414,6 +416,7 @@ impl TableViewMem {
                             .into_py(py);
                     }
                     ArchivedIndexMapping::Concat(_view_uuids) => {
+                        // Compute slices of the inner views and concatenate them together
                         let (start_subview_idx, start_inner_idx) =
                             self.get_subview_and_idx(slice.start as usize).unwrap();
                         let (end_subview_idx, end_inner_idx) =
@@ -452,13 +455,45 @@ impl TableViewMem {
                             })
                             .collect::<Vec<&PyUntypedArray>>();
                         let arr = concat_pyuntypedarrays(py, arrs).unwrap();
-                        return arr.into_py(py);
+                        arr.into_py(py)
                     }
-                    _ => todo!("get_column_range for non-Storage"),
+                    ArchivedIndexMapping::Indices(_view_uuid, _indices) => {
+                        todo!("get_column_range for direct indices mapping")
+                    }
+                    ArchivedIndexMapping::Range {
+                        table_uuid: _,
+                        start: _,
+                        end: _,
+                        step: _,
+                    } => todo!("get_column_range for Range"),
                 }
             } else {
                 // In this case we generate an array of indices
-                todo!()
+                let out_indices = PySliceIter::new(slice).collect::<Vec<usize>>();
+                println!("out_indices: {:?}", out_indices);
+                let first_out = self.get_column_at_idx(col, out_indices[0]);
+                // match first_out {
+                //     IndexingResult::Scalar(v) => {
+                //         let mut out_vec = Vec::with_capacity(out_indices.len());
+                //         out_vec.push(v);
+                //         for &idx in &out_indices[1..] {
+                //             let v = self.get_column_at_idx(col, idx);
+                //             match v {
+                //                 IndexingResult::Scalar(v) => out_vec.push(v),
+                //                 IndexingResult::Array(_) => {
+                //                     panic!("Getting output rows returned scalar and then an array")
+                //                 }
+                //             }
+                //         }
+                //     }
+                //     IndexingResult::Array(_) => {
+                //         todo!("get_column_range for non-contiguous range of arrays")
+                //     }
+                // }
+                // let out_vec = out_indices
+                //     .iter()
+                //     .map(|&idx| self.get_column_at_idx(col, idx as usize))
+                todo!("get_column_range for non-contiguous range")
             }
         })
     }
@@ -667,6 +702,114 @@ fn concat_pyuntypedarrays<'py>(
         .downcast::<PyUntypedArray>()
         .expect("concatenate didn't return an array"))
 }
+
+mod py_slice_iter {
+    use super::*;
+    pub enum PySliceIter {
+        PySliceIter(PySliceIndices),
+    }
+
+    impl PySliceIter {
+        pub fn new(indices: &PySliceIndices) -> Self {
+            PySliceIter::PySliceIter(PySliceIndices {
+                start: indices.start,
+                stop: indices.stop,
+                step: indices.step,
+                slicelength: indices.slicelength,
+            })
+        }
+    }
+
+    /// Turn a PySliceIndices into an iterator that yields the indices in the slice
+    impl Iterator for PySliceIter {
+        type Item = usize;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            let PySliceIter::PySliceIter(indices) = self;
+
+            match indices.step.cmp(&0) {
+                Ordering::Equal => None,
+                Ordering::Greater => {
+                    if indices.start >= indices.stop {
+                        return None;
+                    }
+                    let out = indices.start as usize;
+                    indices.start += indices.step;
+                    indices.slicelength -= 1;
+                    Some(out)
+                }
+                Ordering::Less => {
+                    if indices.start <= indices.stop {
+                        return None;
+                    }
+                    let out = indices.start as usize;
+                    indices.start += indices.step;
+                    indices.slicelength -= 1;
+                    Some(out)
+                }
+            }
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let PySliceIter::PySliceIter(indices) = self;
+            let len = indices.slicelength as usize;
+            (len, Some(len))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_py_slice_iter_empty() {
+        let indices = PySliceIndices {
+            start: 0,
+            stop: 0,
+            step: 1,
+            slicelength: 0,
+        };
+        let mut iter = PySliceIter::new(&indices);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_py_slice_iter_positive_step() {
+        let indices = PySliceIndices {
+            start: 0,
+            stop: 10,
+            step: 2,
+            slicelength: 5,
+        };
+        let mut iter = PySliceIter::new(&indices);
+        assert_eq!(iter.next(), Some(0));
+        assert_eq!(iter.next(), Some(2));
+        assert_eq!(iter.next(), Some(4));
+        assert_eq!(iter.next(), Some(6));
+        assert_eq!(iter.next(), Some(8));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_py_slice_iter_negative_step() {
+        let indices = PySliceIndices {
+            start: 10,
+            stop: 0,
+            step: -2,
+            slicelength: 5,
+        };
+        let mut iter = PySliceIter::new(&indices);
+        assert_eq!(iter.next(), Some(10));
+        assert_eq!(iter.next(), Some(8));
+        assert_eq!(iter.next(), Some(6));
+        assert_eq!(iter.next(), Some(4));
+        assert_eq!(iter.next(), Some(2));
+        assert_eq!(iter.next(), None);
+    }
+}
+
+use py_slice_iter::*;
 
 type FileSerializer = CompositeSerializer<
     WriteSerializer<File>,
