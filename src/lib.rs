@@ -115,11 +115,29 @@ enum IndexMapping {
     },
 }
 
-/// A TableView along with the associated in-RAM metadata. This is mostly a collection of Arcs,
-/// along with a little runtime data.
+/// A view into a table. A table is a collection of columns, each of which has a name along with a
+/// dtype and a shape for the entries. E.g.:
+///
+/// tbl_dict = {
+///   "foo": np.arange(45*16*2, dtype=np.float32).reshape((45,16,2)),
+///   "bar": np.arange(45, dtype=np.int64),
+///   "baz": np.array(["hello"] * 45)
+/// }
+/// tbl = infinidata.TableView(tbl_dict)
+///
+/// Here, tbl_dict is a dictionary mapping column names to NumPy arrays. We use it to construct
+/// a TableView. The columns are "foo", "bar", and "baz", with dtypes float32, int64, and string,
+/// and shapes (16, 2), (), and (). The table has 45 rows. The rows of a TableView can be accessed
+/// by subscripting with []: tv[5] gets row 5, tv[2:5] gets rows 2, 3, and 4, and
+/// tv[np.array([1, 3, 5])] gets rows 1, 3, and 5. You can also use a slice with a step size:
+/// tv[1:10:2] gets rows 1, 3, 5, 7, and 9.
 #[pyclass(name = "TableView")]
 #[derive(Clone, Debug)]
 struct TableViewMem {
+    // We separate the TableView Rust struct from the TableViewMem Rust struct, and only expose the
+    // latter to Python. TableView is Archive, and is what goes on disk, TableViewMem has access
+    // to the underlying TableView and TableDesc via mmap, and carries various info used to resolve
+    // access to the underlying data as well as create new TableViews.
     view: Arc<MmapArchived<TableView>>,
     desc: Arc<MmapArchived<TableDesc>>,
     storage: Option<Arc<MmapArchived<TableStorage>>>, // If the IndexMapping is Storage
@@ -287,6 +305,7 @@ impl TableViewMem {
         }
     }
 
+    /// Get the UUID of the TableView
     fn uuid(&self) -> String {
         self.view.uuid.to_string()
     }
@@ -338,7 +357,16 @@ impl TableViewMem {
     }
 
     /// Make a new TableView from an existing one, remapping the indices either using an index
-    /// array or a range.
+    /// array or a range. E.g.:
+    ///
+    /// tv = infinidata.TableView({"foo": np.arange(45, dtype=np.int64)})
+    /// tv2 = tv.new_view(np.array([1, 3, 5]))
+    /// tv3 = tv.new_view(slice(1, 10, 2))
+    /// tv4 = tv.new_view(slice(None, None, -1))
+    ///
+    /// tv2 is a new view with the 1st, 3rd, and 5th rows of tv. The slice function is equivalent
+    /// the [start:stop:step] notation used when subscripting. tv3 is a new view with the 1st, 3rd,
+    /// 5th, 7th, and 9th rows of tv. tv4 is a new view with the rows of tv in reverse order.
     fn new_view(&self, mapping: &PyAny) -> PyResult<Self> {
         let py = mapping.py();
         if let Ok(idx_array) = mapping.downcast::<PyArray1<i64>>() {
