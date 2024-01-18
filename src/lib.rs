@@ -109,9 +109,11 @@ enum IndexMapping {
     /// Map to a range of indices in a TableView
     Range {
         table_uuid: Uuid,
+        // These are signed sizes to support negative steps and when the stop index is -1, which
+        // means we cover index 0. The start index can never be negative, that would be OOB.
         start: usize,
-        end: usize,
-        step: usize,
+        stop: isize,
+        step: isize,
     },
 }
 
@@ -299,9 +301,9 @@ impl TableViewMem {
             ArchivedIndexMapping::Range {
                 table_uuid: _,
                 start,
-                end,
+                stop,
                 step,
-            } => ((end - start) / step) as usize,
+            } => ((stop - *start as i64) / step) as usize,
         }
     }
 
@@ -396,14 +398,15 @@ impl TableViewMem {
             })
         } else if let Ok(slice) = mapping.downcast::<PySlice>() {
             let slice_idxs = slice.indices(self.len() as i64)?;
+            println!("slice_idxs: {:?}", slice_idxs);
             let table_view = TableView {
                 uuid: Uuid::new_v4(),
                 desc_uuid: self.desc.uuid,
                 index_mapping: IndexMapping::Range {
                     table_uuid: self.view.uuid,
                     start: slice_idxs.start as usize,
-                    end: slice_idxs.stop as usize,
-                    step: slice_idxs.step as usize,
+                    stop: slice_idxs.stop,
+                    step: slice_idxs.step,
                 },
             };
             let table_view_archived = table_view.make_mmapped();
@@ -437,7 +440,7 @@ impl TableViewMem {
         SF: FnOnce(&'a ArchivedColumnStorage) -> O,
         CF: FnOnce(&'a [TableViewMem]) -> O,
         IF: FnOnce(&'a TableViewMem, &[u64]) -> O,
-        RF: FnOnce(&'a TableViewMem, usize, usize, usize) -> O,
+        RF: FnOnce(&'a TableViewMem, usize, isize, isize) -> O,
     {
         match &self.view.index_mapping {
             ArchivedIndexMapping::Storage(_storage_uuid) => {
@@ -465,7 +468,7 @@ impl TableViewMem {
             ArchivedIndexMapping::Range {
                 table_uuid: _,
                 start,
-                end,
+                stop,
                 step,
             } => {
                 let referenced_view = self
@@ -475,8 +478,8 @@ impl TableViewMem {
                 range_fun(
                     referenced_view,
                     *start as usize,
-                    *end as usize,
-                    *step as usize,
+                    *stop as isize,
+                    *step as isize,
                 )
             }
         }
@@ -504,7 +507,10 @@ impl TableViewMem {
                 subview.get_f32_column_at_idx(col, inner_idx)
             },
             |tgt_tbl, indices| tgt_tbl.get_f32_column_at_idx(col, indices[idx] as usize),
-            |tgt_tbl, start, _end, step| tgt_tbl.get_f32_column_at_idx(col, start + idx * step),
+            |tgt_tbl, start, _end, step| {
+                tgt_tbl
+                    .get_f32_column_at_idx(col, (start as isize + ((idx as isize) * step)) as usize)
+            },
         )
     }
 
@@ -527,7 +533,10 @@ impl TableViewMem {
                 subview.get_i32_column_at_idx(col, inner_idx)
             },
             |tgt_tbl, indices| tgt_tbl.get_i32_column_at_idx(col, indices[idx] as usize),
-            |tgt_tbl, start, _end, step| tgt_tbl.get_i32_column_at_idx(col, start + idx * step),
+            |tgt_tbl, start, _end, step| {
+                tgt_tbl
+                    .get_i32_column_at_idx(col, (start as isize + (idx as isize) * step) as usize)
+            },
         )
     }
 
@@ -550,7 +559,10 @@ impl TableViewMem {
                 subview.get_i64_column_at_idx(col, inner_idx)
             },
             |tgt_tbl, indices| tgt_tbl.get_i64_column_at_idx(col, indices[idx] as usize),
-            |tgt_tbl, start, _end, step| tgt_tbl.get_i64_column_at_idx(col, start + idx * step),
+            |tgt_tbl, start, _end, step| {
+                tgt_tbl
+                    .get_i64_column_at_idx(col, (start as isize + (idx as isize) * step) as usize)
+            },
         )
     }
 
@@ -579,7 +591,12 @@ impl TableViewMem {
                 subview.get_string_column_at_idx(col, inner_idx)
             },
             |tgt_tbl, indices| tgt_tbl.get_string_column_at_idx(col, indices[idx] as usize),
-            |tgt_tbl, start, _end, step| tgt_tbl.get_string_column_at_idx(col, start + idx * step),
+            |tgt_tbl, start, _end, step| {
+                tgt_tbl.get_string_column_at_idx(
+                    col,
+                    (start as isize + (idx as isize) * step) as usize,
+                )
+            },
         )
     }
 

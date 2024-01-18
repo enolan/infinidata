@@ -379,3 +379,20 @@ def test_new_view_slice_noncontiguous(tbl_view, request):
         np.testing.assert_array_equal(
             new_view_dict[k], tbl_dict[k][3:15:3], strict=True
         )
+
+@pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
+def test_new_view_slice_reverse(tbl_view, request):
+    tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
+
+    # Generate a new view
+    new_view = tbl_view.new_view(slice(None, None, -1)) # Equivalent to [::-1]
+
+    # Check that the new view has the correct length
+    assert len(new_view) == len(tbl_view)
+
+    for idx in range(len(tbl_view)):
+        new_dict = new_view[idx]
+        for k in new_dict.keys():
+            np.testing.assert_array_equal(
+                new_dict[k], tbl_dict[k][-idx-1], strict=True
+            )
