@@ -17,7 +17,10 @@ use rkyv::ser::serializers::{
 use rkyv::ser::Serializer;
 use rkyv::validation::validators::{check_archived_root, DefaultValidator};
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
-use std::cmp::Ordering;
+use std::any::type_name;
+use std::cmp::{min, Ordering};
+use std::env;
+use std::fs;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,6 +29,7 @@ use uuid::Uuid;
 /// Our top level module
 #[pymodule]
 fn infinidata(_py: Python, m: &PyModule) -> PyResult<()> {
+    unsafe { setup_tmpdir_path() }; // It's safe to invoke this because we have the GIL here.
     m.add_class::<TableViewMem>()?;
     Ok(())
 }
@@ -89,14 +93,6 @@ struct TableView {
     uuid: Uuid,
     desc_uuid: Uuid,
     index_mapping: IndexMapping,
-}
-
-impl TableView {
-    fn make_mmapped(&self) -> MmapArchived<TableView> {
-        let path: PathBuf = format!("TableView-{}.bin", self.uuid).into();
-        let file = write_serialize(self, &path).unwrap();
-        load_archived::<TableView>(file, &path).unwrap()
-    }
 }
 
 /// A mapping from the indices in a view to the indices in a table
@@ -166,7 +162,7 @@ impl TableViewMem {
             desc_uuid: desc.uuid,
             index_mapping: IndexMapping::Storage(storage.uuid),
         };
-        let view_archived = view.make_mmapped();
+        let view_archived = unsafe { make_mmapped(&view) };
         let ncols = desc.columns.len();
         TableViewMem {
             view: Arc::new(view_archived),
@@ -351,7 +347,7 @@ impl TableViewMem {
             cum_lengths.push(cum_length);
         }
 
-        let table_view_archived = table_view.make_mmapped();
+        let table_view_archived = unsafe { make_mmapped(&table_view) };
         Ok(TableViewMem {
             view: Arc::new(table_view_archived),
             desc: Arc::clone(&views[0].extract::<PyRef<Self>>()?.desc),
@@ -391,7 +387,7 @@ impl TableViewMem {
                 desc_uuid: self.desc.uuid,
                 index_mapping: IndexMapping::Indices(self.view.uuid, idx_vec),
             };
-            let table_view_archived = table_view.make_mmapped();
+            let table_view_archived = unsafe { make_mmapped(&table_view) };
             Ok(TableViewMem {
                 view: Arc::new(table_view_archived),
                 desc: Arc::clone(&self.desc),
@@ -413,7 +409,7 @@ impl TableViewMem {
                     step: slice_idxs.step,
                 },
             };
-            let table_view_archived = table_view.make_mmapped();
+            let table_view_archived = unsafe { make_mmapped(&table_view) };
             Ok(TableViewMem {
                 view: Arc::new(table_view_archived),
                 desc: Arc::clone(&self.desc),
@@ -449,7 +445,7 @@ impl TableViewMem {
             desc_uuid: self.desc.uuid,
             index_mapping: IndexMapping::Indices(self.view.uuid, indices.to_vec()),
         };
-        let table_view_archived = table_view.make_mmapped();
+        let table_view_archived = unsafe { make_mmapped(&table_view) };
         Ok(TableViewMem {
             view: Arc::new(table_view_archived),
             desc: Arc::clone(&self.desc),
@@ -457,6 +453,21 @@ impl TableViewMem {
             concat_views: None,
             referenced_view: Some(Box::new(self.clone())),
             live_columns: self.live_columns.clone(),
+        })
+    }
+
+    /// Iterate over the rows of a TableView in batches.
+    fn batch_iter(&self, batch_size: usize, drop_last_batch: bool) -> PyResult<BatchIter> {
+        if drop_last_batch && batch_size > self.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "batch_size must be <= the number of rows in the table if drop_last_batch is true",
+            ));
+        }
+        Ok(BatchIter {
+            view: self.clone(),
+            batch_size,
+            drop_last_batch,
+            batch_idx: 0,
         })
     }
 }
@@ -1107,24 +1118,86 @@ fn table_desc_and_columns_from_dict(
         uuid: td_uuid,
         columns: column_descs,
     };
-    let path: PathBuf = format!("TableDesc-{}.bin", td_uuid).into();
-    let file = write_serialize(&td, &path)?;
-    let td_archived = load_archived::<TableDesc>(file, &path).map_err(|err| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!("Error loading table desc: {}", err))
-    })?;
+    let td_archived = unsafe { make_mmapped(&td) };
 
     let ts_uuid = Uuid::new_v4();
     let ts = TableStorage {
-        uuid: td_uuid,
+        uuid: ts_uuid,
         columns: column_storages,
     };
-    let path: PathBuf = format!("TableStorage-{}.bin", ts_uuid).into();
-    let file = write_serialize(&ts, &path)?;
-    let ts_archived = load_archived::<TableStorage>(file, &path).map_err(|err| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!("Error loading table storage: {}", err))
-    })?;
+    let ts_archived = unsafe { make_mmapped(&ts) };
 
     Ok((td_archived, ts_archived))
+}
+
+static mut TMPDIR_PATH: Option<PathBuf> = None;
+
+/// Set up the directory to store objects in. Not threadsafe.
+unsafe fn setup_tmpdir_path() {
+    assert_eq!(TMPDIR_PATH, None);
+    match env::var("INFINIDATA_TMPDIR") {
+        Ok(val) => {
+            let path = Path::new(&val)
+                .canonicalize()
+                .expect("INFINIDATA_TMPDIR is not a valid path");
+            if path.is_dir() || fs::create_dir_all(&path).is_ok() {
+                TMPDIR_PATH = Some(path.to_path_buf());
+            } else {
+                panic!("INFINIDATA_TMPDIR is set but is not a valid path.");
+            }
+        }
+        Err(_) => {
+            let cwd = env::current_dir().unwrap();
+            let default_path = cwd.join(".infinidata_tmp");
+            if default_path.is_dir() || fs::create_dir_all(&default_path).is_ok() {
+                TMPDIR_PATH = Some(default_path);
+            } else {
+                panic!("Could not create default tmpdir path.");
+            }
+        }
+    }
+}
+
+trait HasUuid {
+    fn get_uuid(&self) -> Uuid;
+}
+
+impl HasUuid for TableDesc {
+    fn get_uuid(&self) -> Uuid {
+        self.uuid
+    }
+}
+
+impl HasUuid for TableStorage {
+    fn get_uuid(&self) -> Uuid {
+        self.uuid
+    }
+}
+
+impl HasUuid for TableView {
+    fn get_uuid(&self) -> Uuid {
+        self.uuid
+    }
+}
+
+/// Given an Archive type, write it to disk and return the mmapped struct. Unsafe because it relies
+/// on TMPDIR_PATH being set up.
+unsafe fn make_mmapped<T>(obj: &T) -> MmapArchived<T>
+where
+    T: HasUuid + Archive + Serialize<FileSerializer>,
+    for<'a> T::Archived: CheckBytes<DefaultValidator<'a>>,
+{
+    if let Some(tmpdir) = &TMPDIR_PATH {
+        let name: PathBuf = format!("{}-{}.bin", type_name::<T>(), obj.get_uuid()).into();
+        let path = tmpdir.join(name);
+        let file = write_serialize(obj, &path)
+            .unwrap_or_else(|err| panic!("writing to tmpdir failed, path was {:?}: {}", path, err));
+        load_archived::<T>(file, &path).unwrap_or_else(|err| {
+            panic!("loading from tmpdir failed, path was {:?}: {}", path, err)
+        })
+    } else {
+        panic!("TMPDIR_PATH not set up");
+    }
 }
 
 /// Get the dtype from a numpy array
@@ -1199,6 +1272,42 @@ fn column_storage_from_pyarray(py: Python<'_>, array: &PyUntypedArray) -> PyResu
         }
     };
     Ok(storage)
+}
+
+#[pyclass]
+struct BatchIter {
+    view: TableViewMem,
+    batch_size: usize,
+    drop_last_batch: bool,
+    batch_idx: usize,
+}
+
+#[pymethods]
+impl BatchIter {
+    fn __iter__(slf: PyRef<Self>) -> PyRef<Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> Option<Py<PyDict>> {
+        let batch_start = self.batch_idx * self.batch_size;
+        let batch_stop = batch_start + self.batch_size;
+        let len = self.view.len();
+
+        if batch_stop > len && self.drop_last_batch {
+            return None;
+        }
+        if batch_start >= len {
+            return None;
+        }
+        let batch_stop = min(batch_stop, len);
+        let slice = PySlice::new(py, batch_start as isize, batch_stop as isize, 1);
+        let batch = self
+            .view
+            .get_item(slice.downcast().unwrap())
+            .expect("getting batch failed");
+        self.batch_idx += 1;
+        Some(batch)
+    }
 }
 
 // For some reason there's no Rust interface to reshape on PyUntypedArrays, so we have to go via

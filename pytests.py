@@ -421,3 +421,38 @@ def test_shuffle(tbl_view, request):
                 found_rows[j] += 1
                 break
     assert np.all(found_rows == 1)
+
+
+@pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
+def test_batch_iter_drop_last(tbl_view, request):
+    tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
+
+    batch_cnt = 0
+    for i, batch in enumerate(tbl_view.batch_iter(5, drop_last_batch=True)):
+        batch_cnt += 1
+        for k in batch.keys():
+            assert len(batch[k]) == 5
+            np.testing.assert_array_equal(
+                batch[k], tbl_dict[k][i * 5 : (i + 1) * 5], strict=True
+            )
+
+    assert batch_cnt == len(tbl_view) // 5
+
+
+@pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
+def test_batch_iter_no_drop_last(tbl_view, request):
+    tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
+
+    batch_cnt = 0
+    for i, batch in enumerate(tbl_view.batch_iter(5, drop_last_batch=False)):
+        batch_cnt += 1
+        for k in batch.keys():
+            if i == len(tbl_view) // 5:
+                assert len(batch[k]) == len(tbl_view) % 5
+            else:
+                assert len(batch[k]) == 5
+            np.testing.assert_array_equal(
+                batch[k], tbl_dict[k][i * 5 : (i + 1) * 5], strict=True
+            )
+
+    assert batch_cnt == len(tbl_view) // 5 + (1 if len(tbl_view) % 5 != 0 else 0)
