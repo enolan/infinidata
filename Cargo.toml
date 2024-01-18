@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 memmap = "0.7.0"
 numpy = "0.20.0"
 pyo3 = "0.20.1"
+rand = "0.8.5"
 rkyv = { version = "0.7.43", default-features = false, features = [
     "alloc",
     "size_64",

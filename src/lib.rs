@@ -6,6 +6,10 @@ use numpy::PyUntypedArray;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::*;
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
+use rand::SeedableRng;
 use rkyv::ser::serializers::{
     AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch, SharedSerializeMap,
     WriteSerializer,
@@ -424,6 +428,37 @@ impl TableViewMem {
             ))
         }
     }
+
+    /// Shuffles the rows of a TableView. N.b. this will use enough memory to make a complete
+    /// index array. An offline approach is possible if you have an absurd number of rows, but not
+    /// implemented.
+    fn shuffle(&self, seed: Option<u64>) -> PyResult<Self> {
+        let indices: &mut [usize] = &mut (0..self.len()).collect::<Vec<usize>>();
+        match seed {
+            None => {
+                let mut rng = thread_rng();
+                indices.shuffle(&mut rng);
+            }
+            Some(seed) => {
+                let mut rng = StdRng::seed_from_u64(seed);
+                indices.shuffle(&mut rng);
+            }
+        }
+        let table_view = TableView {
+            uuid: Uuid::new_v4(),
+            desc_uuid: self.desc.uuid,
+            index_mapping: IndexMapping::Indices(self.view.uuid, indices.to_vec()),
+        };
+        let table_view_archived = table_view.make_mmapped();
+        Ok(TableViewMem {
+            view: Arc::new(table_view_archived),
+            desc: Arc::clone(&self.desc),
+            storage: None,
+            concat_views: None,
+            referenced_view: Some(Box::new(self.clone())),
+            live_columns: self.live_columns.clone(),
+        })
+    }
 }
 
 impl TableViewMem {
@@ -700,7 +735,7 @@ impl TableViewMem {
                             }),
                     )
                 },
-                |_tgt_tbl, _indices| todo!("get_f32_column_range for direct indices mapping"),
+                |_tgt_tbl, _indices| fallback(),
                 |tgt_tbl, inner_start, _inner_end, inner_step| {
                     if inner_step == 1 {
                         // If the inner range is contiguous then we can just use the same range
@@ -781,7 +816,7 @@ impl TableViewMem {
                             }),
                     )
                 },
-                |_tgt_tbl, _indices| todo!("get_i32_column_range for direct indices mapping"),
+                |_tgt_tbl, _indices| fallback(),
                 |tgt_tbl, inner_start, _inner_end, inner_step| {
                     if inner_step == 1 {
                         // If the inner range is contiguous then we can just use the same range
@@ -862,7 +897,7 @@ impl TableViewMem {
                             }),
                     )
                 },
-                |_tgt_tbl, _indices| todo!("get_i64_column_range for direct indices mapping"),
+                |_tgt_tbl, _indices| fallback(),
                 |tgt_tbl, inner_start, _inner_end, inner_step| {
                     if inner_step == 1 {
                         // If the inner range is contiguous then we can just use the same range
@@ -945,7 +980,7 @@ impl TableViewMem {
                             }),
                     )
                 },
-                |_tgt_tbl, _indices| todo!("get_string_column_range for direct indices mapping"),
+                |_tgt_tbl, _indices| fallback(),
                 |tgt_tbl, inner_start, _inner_end, inner_step| {
                     if inner_step == 1 {
                         // If the inner range is contiguous then we can just use the same range

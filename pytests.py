@@ -396,3 +396,23 @@ def test_new_view_slice_reverse(tbl_view, request):
             np.testing.assert_array_equal(
                 new_dict[k], tbl_dict[k][-idx-1], strict=True
             )
+
+@pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
+def test_shuffle(tbl_view, request):
+    tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
+
+    # Generate a shuffled view
+    shuffled_view = tbl_view.shuffle()
+
+    # Check that the shuffled view has the correct length
+    assert len(shuffled_view) == len(tbl_view)
+
+    # Check that the shuffled view has the correct data
+    found_rows = np.zeros(len(tbl_view), dtype=np.int32)
+    for i in range(len(tbl_view)):
+        shuffled_dict = shuffled_view[i]
+        for j in range(len(tbl_view)):
+            if all(np.array_equal(shuffled_dict[k], tbl_dict[k][j]) for k in shuffled_dict.keys()):
+                found_rows[j] += 1
+                break
+    assert np.all(found_rows == 1)
