@@ -72,7 +72,6 @@ def test_simple_slicing(tbl_view, request):
             np.testing.assert_array_equal(view_dict[key], tbl_dict[key][idx_slice])
 
 
-@pytest.mark.xfail
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
 def test_slicing_with_step(tbl_view, request):
     tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
@@ -82,7 +81,6 @@ def test_slicing_with_step(tbl_view, request):
             np.testing.assert_array_equal(view_dict[key], tbl_dict[key][idx_slice])
 
 
-@pytest.mark.xfail
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
 def test_slicing_with_negative_step(tbl_view, request):
     tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
@@ -101,7 +99,6 @@ def test_slicing_with_negative_start_and_stop(tbl_view, request):
             np.testing.assert_array_equal(view_dict[key], tbl_dict[key][idx_slice])
 
 
-@pytest.mark.xfail
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
 def test_slicing_with_negative_start_stop_and_step(tbl_view, request):
     tbl_view, tbl_dict = request.getfixturevalue(tbl_view)

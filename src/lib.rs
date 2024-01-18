@@ -138,16 +138,14 @@ impl TableViewMem {
         let file = write_serialize(&view, &path).unwrap();
         let view_archived = load_archived::<TableView>(file, &path).unwrap();
         let ncols = desc.columns.len();
-        let tv = TableViewMem {
+        TableViewMem {
             view: Arc::new(view_archived),
             desc: Arc::new(desc),
             storage: Some(Arc::new(storage)),
             concat_views: None,
             referenced_view: None,
             live_columns: (0..ncols).collect(),
-        };
-        println!("TableViewMem: {:?}", tv);
-        tv
+        }
     }
 
     #[pyo3(name = "__getitem__")]
@@ -167,22 +165,74 @@ impl TableViewMem {
             }
             for (col, col_desc) in column_descs {
                 let col_name = col_desc.name.to_string();
-                match self.get_column_at_idx(col, index) {
-                    IndexingResult::Scalar(scalar) => out.set_item(col_name, scalar)?,
-                    IndexingResult::Array(array) => out.set_item(col_name, array)?,
+                let mut arr: &PyUntypedArray;
+                match col_desc.dtype {
+                    ArchivedDType::F32 => {
+                        let iter = self.get_f32_column_at_idx(col, index);
+                        arr = np::PyArray::from_iter(py, iter).downcast().unwrap();
+                    }
+                    ArchivedDType::I32 => {
+                        let iter = self.get_i32_column_at_idx(col, index);
+                        arr = np::PyArray::from_iter(py, iter).downcast().unwrap();
+                    }
+                    ArchivedDType::I64 => {
+                        let iter = self.get_i64_column_at_idx(col, index);
+                        arr = np::PyArray::from_iter(py, iter).downcast().unwrap();
+                    }
+                    ArchivedDType::UString => {
+                        let iter = self.get_string_column_at_idx(col, index);
+                        let strings = iter.collect::<Vec<String>>();
+                        let string_list = PyList::new(py, strings);
+                        let np = py.import(intern!(py, "numpy")).unwrap();
+                        let fun = np.getattr(intern!(py, "array")).unwrap();
+                        arr = fun.call1((string_list,)).unwrap().downcast().unwrap();
+                    }
                 }
+                let dims: &[usize] = &col_desc
+                    .dims
+                    .iter()
+                    .map(|&d| d as usize)
+                    .collect::<Vec<usize>>();
+                if !dims.is_empty() {
+                    arr = reshape_pyuntypedarray(py, arr, dims).unwrap();
+                }
+                out.set_item(col_name, arr).unwrap();
             }
             Ok(out.into())
         } else if let Ok(slice) = index.downcast::<PySlice>() {
             let slice_idxs = slice.indices(self.len() as i64)?;
-            println!("slice_idxs: {:?}", slice_idxs);
             // This has the Python semantics where getting a slice is never out of bounds, even if
             // your bounds go past the end of the array. You do get an exception if you try to
             // specify a step size of 0 though.
             for (col, col_desc) in column_descs {
                 let col_name = col_desc.name.to_string();
-                out.set_item(col_name, self.get_column_range(col, &slice_idxs))
-                    .unwrap();
+                let arr: &PyUntypedArray = match col_desc.dtype {
+                    ArchivedDType::F32 => {
+                        let iter = self.get_f32_column_range(col, &slice_idxs);
+                        np::PyArray::from_iter(py, iter).downcast().unwrap()
+                    }
+                    ArchivedDType::I32 => {
+                        let iter = self.get_i32_column_range(col, &slice_idxs);
+                        np::PyArray::from_iter(py, iter).downcast().unwrap()
+                    }
+                    ArchivedDType::I64 => {
+                        let iter = self.get_i64_column_range(col, &slice_idxs);
+                        np::PyArray::from_iter(py, iter).downcast().unwrap()
+                    }
+                    ArchivedDType::UString => {
+                        let iter = self.get_string_column_range(col, &slice_idxs);
+                        let strings = iter.collect::<Vec<String>>();
+                        let string_list = PyList::new(py, strings);
+                        let np = py.import(intern!(py, "numpy")).unwrap();
+                        let fun = np.getattr(intern!(py, "array")).unwrap();
+                        fun.call1((string_list,)).unwrap().downcast().unwrap()
+                    }
+                };
+                let out_dims = std::iter::once(slice_idxs.slicelength as usize)
+                    .chain(col_desc.dims.iter().map(|&d| d as usize))
+                    .collect::<Vec<usize>>();
+                let arr = reshape_pyuntypedarray(py, arr, &out_dims).unwrap();
+                out.set_item(col_name, arr).unwrap();
             }
             Ok(out.into())
         } else if let Ok(idx_array) = index.downcast::<PyArray1<i64>>() {
@@ -285,225 +335,442 @@ impl TableViewMem {
     }
 }
 
-enum IndexingResult {
-    Scalar(Py<PyAny>),         // native python int, float, or str
-    Array(Py<PyUntypedArray>), // numpy array
-}
-
 impl TableViewMem {
-    /// Get the values for a column at a given index
-    fn get_column_at_idx(&self, col: usize, idx: usize) -> IndexingResult {
-        let col_desc = &self.desc.columns[col];
-        Python::with_gil(|py| {
-            let arr: &PyUntypedArray = match &self.view.index_mapping {
-                ArchivedIndexMapping::Storage(_storage_uuid) => {
-                    let storage = self
-                        .storage
-                        .as_ref()
-                        .expect("storage not set when IndexMapping is Storage");
-                    let col_storage = &storage.columns[col];
-                    let dims_product: usize = col_desc.dims.iter().product::<u64>() as usize;
-                    let start = idx * dims_product; // TODO use Result and throw if index is out of bounds
-                    let end = start + dims_product;
-                    match col_storage {
-                        ArchivedColumnStorage::F32(data) => {
-                            np::PyArray::from_slice(py, &data[start..end]).as_untyped()
-                        }
-                        ArchivedColumnStorage::I32(data) => {
-                            np::PyArray::from_slice(py, &data[start..end]).as_untyped()
-                        }
-                        ArchivedColumnStorage::I64(data) => {
-                            np::PyArray::from_slice(py, &data[start..end]).as_untyped()
-                        }
-                        ArchivedColumnStorage::UString(data) => {
-                            let data = data[start..end].iter().map(|s| s.to_string());
-                            // Rust-numpy doesn't support strings, so we go via Python. This is
-                            // real inefficient, but hopefully not on the critical path?
-                            let string_list = PyList::new(py, data);
-                            let np = py.import(intern!(py, "numpy")).unwrap();
-                            let fun = np.getattr(intern!(py, "array")).unwrap();
-                            fun.call1((string_list,)).unwrap().downcast().unwrap()
-                        }
-                    }
-                }
-                ArchivedIndexMapping::Concat(_view_uuids) => {
-                    let (subview_idx, inner_idx) = self.get_subview_and_idx(idx).unwrap();
-                    let subview: &TableViewMem = &self
-                        .concat_views
-                        .as_ref()
-                        .expect("concat_views not set when IndexMapping is Concat")
-                        .0[subview_idx];
-                    return subview.get_column_at_idx(col, inner_idx);
-                }
-                ArchivedIndexMapping::Indices(_view_uuid, _indices) => todo!(),
-                ArchivedIndexMapping::Range {
-                    table_uuid: _,
-                    start: _,
-                    end: _,
-                    step: _,
-                } => todo!(),
-            };
-            let dims: &[u64] = &col_desc.dims;
-            if dims.is_empty() {
-                // Like reshape, indexing doesn't exist on PyUntypedArray, so we have to go via
-                // Python
-                IndexingResult::Scalar(arr.get_item(0).unwrap().into_py(py))
-            } else {
-                // This conversion is actually a NOP but oh well
-                let dims: &[usize] = &dims.iter().map(|&d| d as usize).collect::<Vec<usize>>();
-                IndexingResult::Array(
-                    reshape_pyuntypedarray(py, arr, dims)
-                        .expect("reshape back to original dims failed")
-                        .into_py(py),
+    /// Run different closures depending on the kind of index mapping
+    fn map_index_mapping<'a, SF, CF, IF, RF, O>(
+        &'a self,
+        col: usize,
+        storage_fun: SF,
+        concat_fun: CF,
+        indices_fun: IF,
+        range_fun: RF,
+    ) -> O
+    where
+        SF: FnOnce(&'a ArchivedColumnStorage) -> O,
+        CF: FnOnce(&'a [TableViewMem]) -> O,
+        IF: FnOnce(&'a TableViewMem, &[u64]) -> O,
+        RF: FnOnce(&'a TableViewMem, usize, usize, usize) -> O,
+    {
+        match &self.view.index_mapping {
+            ArchivedIndexMapping::Storage(_storage_uuid) => {
+                let storage = self
+                    .storage
+                    .as_ref()
+                    .expect("storage not set when IndexMapping is Storage");
+                let col_storage = &storage.columns[col];
+                storage_fun(col_storage)
+            }
+            ArchivedIndexMapping::Concat(_view_uuids) => {
+                let (concat_views, _cum_lengths) = self
+                    .concat_views
+                    .as_ref()
+                    .expect("concat_views not set when IndexMapping is Concat");
+                concat_fun(concat_views)
+            }
+            ArchivedIndexMapping::Indices(_view_uuid, indices) => {
+                let referenced_view = self
+                    .referenced_view
+                    .as_ref()
+                    .expect("referenced_view not set when IndexMapping is Indices");
+                indices_fun(referenced_view, indices)
+            }
+            ArchivedIndexMapping::Range {
+                table_uuid: _,
+                start,
+                end,
+                step,
+            } => {
+                let referenced_view = self
+                    .referenced_view
+                    .as_ref()
+                    .expect("referenced_view not set when IndexMapping is Range");
+                range_fun(
+                    referenced_view,
+                    *start as usize,
+                    *end as usize,
+                    *step as usize,
                 )
             }
-        })
+        }
     }
 
-    /// Get a range of a column.
-    fn get_column_range(&self, col: usize, slice: &PySliceIndices) -> Py<PyUntypedArray> {
-        Python::with_gil(|py| {
-            if slice.slicelength == 0 {
-                let out: &PyArray1<u8> = PyArray1::from_slice(py, &[]);
-                return out.as_untyped().into_py(py);
-            }
-            let mut out_shape = Vec::with_capacity(self.desc.columns[col].dims.len() + 1);
-            out_shape.push(slice.slicelength as usize);
-            out_shape.extend(self.desc.columns[col].dims.iter().map(|&d| d as usize));
-
-            if slice.step == 1 {
-                // In this case the range is contiguous
-                match &self.view.index_mapping {
-                    ArchivedIndexMapping::Storage(_storage_uuid) => {
-                        // Slice the underlying storage
-                        let storage = self
-                            .storage
-                            .as_ref()
-                            .expect("storage not set when IndexMapping is Storage");
-                        let dims_product: usize =
-                            self.desc.columns[col].dims.iter().product::<u64>() as usize;
-                        let start_inner_idx = slice.start as usize * dims_product;
-                        let end_inner_idx = slice.stop as usize * dims_product;
-                        let col_storage = &storage.columns[col];
-                        let arr: &PyUntypedArray = match col_storage {
-                            ArchivedColumnStorage::F32(data) => {
-                                np::PyArray::from_slice(py, &data[start_inner_idx..end_inner_idx])
-                                    .as_untyped()
-                            }
-                            ArchivedColumnStorage::I32(data) => {
-                                np::PyArray::from_slice(py, &data[start_inner_idx..end_inner_idx])
-                                    .as_untyped()
-                            }
-                            ArchivedColumnStorage::I64(data) => {
-                                np::PyArray::from_slice(py, &data[start_inner_idx..end_inner_idx])
-                                    .as_untyped()
-                            }
-                            ArchivedColumnStorage::UString(data) => {
-                                let data = data[start_inner_idx..end_inner_idx]
-                                    .iter()
-                                    .map(|s| s.to_string());
-                                // Rust-numpy doesn't support strings, so we go via Python. This is
-                                // real inefficient, but hopefully not on the critical path?
-                                let string_list = PyList::new(py, data);
-                                let np = py.import(intern!(py, "numpy")).unwrap();
-                                let fun = np.getattr(intern!(py, "array")).unwrap();
-                                fun.call1((string_list,)).unwrap().downcast().unwrap()
-                            }
-                        };
-                        assert_eq!(dims_product * slice.slicelength as usize, arr.len());
-                        return reshape_pyuntypedarray(py, arr, &out_shape)
-                            .expect("reshape back to original dims failed")
-                            .into_py(py);
-                    }
-                    ArchivedIndexMapping::Concat(_view_uuids) => {
-                        // Compute slices of the inner views and concatenate them together
-                        let (start_subview_idx, start_inner_idx) =
-                            self.get_subview_and_idx(slice.start as usize).unwrap();
-                        let (end_subview_idx, end_inner_idx) =
-                            self.get_subview_and_idx((slice.stop - 1) as usize).unwrap();
-                        let end_inner_idx = end_inner_idx + 1;
-                        let subviews_to_use = &self
-                            .concat_views
-                            .as_ref()
-                            .expect("concat_views not set when IndexMapping is Concat")
-                            .0[start_subview_idx..=end_subview_idx];
-                        let mut inner_ranges = Vec::with_capacity(subviews_to_use.len());
-                        if start_subview_idx == end_subview_idx {
-                            inner_ranges = vec![(start_inner_idx, end_inner_idx)];
-                        } else {
-                            inner_ranges.push((start_inner_idx, subviews_to_use[0].len()));
-                            for subview in &subviews_to_use[1..subviews_to_use.len() - 1] {
-                                inner_ranges.push((0, subview.len()));
-                            }
-                            inner_ranges.push((0, end_inner_idx));
-                        }
-                        let arrs = inner_ranges
-                            .iter()
-                            .zip(subviews_to_use)
-                            .map(|((start, end), subview)| {
-                                subview
-                                    .get_column_range(
-                                        col,
-                                        &PySliceIndices {
-                                            start: *start as isize,
-                                            stop: *end as isize,
-                                            step: 1,
-                                            slicelength: (*end - *start) as isize,
-                                        },
-                                    )
-                                    .into_ref(py)
-                            })
-                            .collect::<Vec<&PyUntypedArray>>();
-                        let arr = concat_pyuntypedarrays(py, arrs).unwrap();
-                        arr.into_py(py)
-                    }
-                    ArchivedIndexMapping::Indices(_view_uuid, _indices) => {
-                        todo!("get_column_range for direct indices mapping")
-                    }
-                    ArchivedIndexMapping::Range {
-                        table_uuid: _,
-                        start: _,
-                        end: _,
-                        step: _,
-                    } => todo!("get_column_range for Range"),
+    /// Get the values for a column at a given index, assuming the column dtype is f32.
+    // AFAICT there's no way to get Rust's type system to let us make this generic over the dtype.
+    // We could return untyped NumPy arrays but we want to avoid holding the GIL where possible.
+    // could theoretically use macros.
+    fn get_f32_column_at_idx(&self, col: usize, idx: usize) -> Box<dyn Iterator<Item = f32> + '_> {
+        self.map_index_mapping(
+            col,
+            |col_storage| {
+                let dims_product = self.col_dims_product(col);
+                let start = idx * dims_product;
+                let end = start + dims_product;
+                match col_storage {
+                    ArchivedColumnStorage::F32(data) => Box::new(data[start..end].iter().copied())
+                        as Box<dyn Iterator<Item = f32> + '_>,
+                    _ => panic!("get_f32_column_at_idx called on non-f32 column"),
                 }
-            } else {
-                // In this case we generate an array of indices
-                let out_indices = PySliceIter::new(slice).collect::<Vec<usize>>();
-                println!("out_indices: {:?}", out_indices);
-                let first_out = self.get_column_at_idx(col, out_indices[0]);
-                // match first_out {
-                //     IndexingResult::Scalar(v) => {
-                //         let mut out_vec = Vec::with_capacity(out_indices.len());
-                //         out_vec.push(v);
-                //         for &idx in &out_indices[1..] {
-                //             let v = self.get_column_at_idx(col, idx);
-                //             match v {
-                //                 IndexingResult::Scalar(v) => out_vec.push(v),
-                //                 IndexingResult::Array(_) => {
-                //                     panic!("Getting output rows returned scalar and then an array")
-                //                 }
-                //             }
-                //         }
-                //     }
-                //     IndexingResult::Array(_) => {
-                //         todo!("get_column_range for non-contiguous range of arrays")
-                //     }
-                // }
-                // let out_vec = out_indices
-                //     .iter()
-                //     .map(|&idx| self.get_column_at_idx(col, idx as usize))
-                todo!("get_column_range for non-contiguous range")
+            },
+            |_concat_views: &[TableViewMem]| {
+                let (subview, inner_idx) = self.get_subview_and_idx(idx).unwrap();
+                subview.get_f32_column_at_idx(col, inner_idx)
+            },
+            |_tgt_tbl, _indices| todo!("get_f32_column_at_idx for direct indices mapping"),
+            |_tgt_tbl, _start, _end, _step| todo!("get_f32_column_at_idx for Range"),
+        )
+    }
+
+    /// Get the values for a column at a given index, assuming the column dtype is i32.
+    fn get_i32_column_at_idx(&self, col: usize, idx: usize) -> Box<dyn Iterator<Item = i32> + '_> {
+        self.map_index_mapping(
+            col,
+            |col_storage| {
+                let dims_product = self.col_dims_product(col);
+                let start = idx * dims_product;
+                let end = start + dims_product;
+                match col_storage {
+                    ArchivedColumnStorage::I32(data) => Box::new(data[start..end].iter().copied())
+                        as Box<dyn Iterator<Item = i32> + '_>,
+                    _ => panic!("get_i32_column_at_idx called on non-i32 column"),
+                }
+            },
+            |_concat_views: &[TableViewMem]| {
+                let (subview, inner_idx) = self.get_subview_and_idx(idx).unwrap();
+                subview.get_i32_column_at_idx(col, inner_idx)
+            },
+            |_tgt_tbl, _indices| todo!("get_i32_column_at_idx for direct indices mapping"),
+            |_tgt_tbl, _start, _end, _step| todo!("get_i32_column_at_idx for Range"),
+        )
+    }
+
+    /// Get the values for a column at a given index, assuming the column dtype is i64.
+    fn get_i64_column_at_idx(&self, col: usize, idx: usize) -> Box<dyn Iterator<Item = i64> + '_> {
+        self.map_index_mapping(
+            col,
+            |col_storage| {
+                let dims_product = self.col_dims_product(col);
+                let start = idx * dims_product;
+                let end = start + dims_product;
+                match col_storage {
+                    ArchivedColumnStorage::I64(data) => Box::new(data[start..end].iter().copied())
+                        as Box<dyn Iterator<Item = i64> + '_>,
+                    _ => panic!("get_i64_column_at_idx called on non-i64 column"),
+                }
+            },
+            |_concat_views: &[TableViewMem]| {
+                let (subview, inner_idx) = self.get_subview_and_idx(idx).unwrap();
+                subview.get_i64_column_at_idx(col, inner_idx)
+            },
+            |_tgt_tbl, _indices| todo!("get_i64_column_at_idx for direct indices mapping"),
+            |_tgt_tbl, _start, _end, _step| todo!("get_i64_column_at_idx for Range"),
+        )
+    }
+
+    /// Get the values for a column at a given index, assuming the column dtype is string.
+    fn get_string_column_at_idx(
+        &self,
+        col: usize,
+        idx: usize,
+    ) -> Box<dyn Iterator<Item = String> + '_> {
+        self.map_index_mapping(
+            col,
+            |col_storage| {
+                let dims_product = self.col_dims_product(col);
+                let start = idx * dims_product;
+                let end = start + dims_product;
+                match col_storage {
+                    ArchivedColumnStorage::UString(data) => {
+                        Box::new(data[start..end].iter().map(|s| s.to_string()))
+                            as Box<dyn Iterator<Item = String> + '_>
+                    }
+                    _ => panic!("get_string_column_at_idx called on non-string column"),
+                }
+            },
+            |_concat_views: &[TableViewMem]| {
+                let (subview, inner_idx) = self.get_subview_and_idx(idx).unwrap();
+                subview.get_string_column_at_idx(col, inner_idx)
+            },
+            |_tgt_tbl, _indices| todo!("get_string_column_at_idx for direct indices mapping"),
+            |_tgt_tbl, _start, _end, _step| todo!("get_string_column_at_idx for Range"),
+        )
+    }
+
+    /// Get the indices in the storage for a range of indices in the view.
+    fn get_contiguous_range_storage_indices(
+        &self,
+        col: usize,
+        start: usize,
+        stop: usize,
+    ) -> (usize, usize) {
+        let dims_product = self.col_dims_product(col);
+        (start * dims_product, stop * dims_product)
+    }
+
+    /// Get the subviews to use and the ranges within them for a range of indices in a concat view.
+    fn get_contiguous_range_subviews(
+        &self,
+        start: usize,
+        stop: usize,
+    ) -> Vec<(&TableViewMem, usize, usize)> {
+        let (start_subview_idx, start_inner_idx) =
+            self.get_subview_idx_and_inner_idx(start).unwrap();
+        let (end_subview_idx, end_inner_idx) =
+            self.get_subview_idx_and_inner_idx(stop - 1).unwrap();
+        let end_inner_idx = end_inner_idx + 1;
+        let subviews_to_use = &self
+            .concat_views
+            .as_ref()
+            .expect("concat_views not set when IndexMapping is Concat")
+            .0[start_subview_idx..=end_subview_idx];
+        let mut inner_ranges = Vec::with_capacity(subviews_to_use.len());
+        if start_subview_idx == end_subview_idx {
+            inner_ranges = vec![(start_inner_idx, end_inner_idx)];
+        } else {
+            inner_ranges.push((start_inner_idx, subviews_to_use[0].len()));
+            for subview in &subviews_to_use[1..subviews_to_use.len() - 1] {
+                inner_ranges.push((0, subview.len()));
             }
-        })
+            inner_ranges.push((0, end_inner_idx));
+        }
+        inner_ranges
+            .into_iter()
+            .zip(subviews_to_use)
+            .map(|((start, end), subview)| (subview, start, end))
+            .collect()
+    }
+
+    /// Get a range of a column, assuming the column dtype is f32.
+    fn get_f32_column_range(
+        &self,
+        col: usize,
+        slice: &PySliceIndices,
+    ) -> Box<dyn Iterator<Item = f32> + '_> {
+        if slice.slicelength == 0 {
+            return Box::new(std::iter::empty());
+        }
+        if slice.step == 1 {
+            // In this case the range is contiguous
+            self.map_index_mapping(
+                col,
+                |col_storage| {
+                    let (start_inner_idx, end_inner_idx) = self
+                        .get_contiguous_range_storage_indices(
+                            col,
+                            slice.start as usize,
+                            slice.stop as usize,
+                        );
+                    match col_storage {
+                        ArchivedColumnStorage::F32(data) => {
+                            Box::new(data[start_inner_idx..end_inner_idx].iter().copied())
+                                as Box<dyn Iterator<Item = f32> + '_>
+                        }
+                        _ => panic!("get_f32_column_range called on non-f32 column"),
+                    }
+                },
+                |_concat_views: &[TableViewMem]| {
+                    let inner_ranges = self
+                        .get_contiguous_range_subviews(slice.start as usize, slice.stop as usize);
+                    Box::new(
+                        inner_ranges
+                            .into_iter()
+                            .flat_map(move |(subview, start, end)| {
+                                subview.get_f32_column_range(
+                                    col,
+                                    &PySliceIndices {
+                                        start: start as isize,
+                                        stop: end as isize,
+                                        step: 1,
+                                        slicelength: (end - start) as isize,
+                                    },
+                                )
+                            }),
+                    )
+                },
+                |_tgt_tbl, _indices| todo!("get_f32_column_range for direct indices mapping"),
+                |_tgt_tbl, _start, _end, _step| todo!("get_f32_column_range for Range"),
+            )
+        } else {
+            let indices = PySliceIter::new(slice);
+            Box::new(indices.flat_map(move |idx| self.get_f32_column_at_idx(col, idx)))
+        }
+    }
+
+    /// Get a range of a column, assuming the column dtype is f32.
+    fn get_i32_column_range(
+        &self,
+        col: usize,
+        slice: &PySliceIndices,
+    ) -> Box<dyn Iterator<Item = i32> + '_> {
+        if slice.slicelength == 0 {
+            return Box::new(std::iter::empty());
+        }
+        if slice.step == 1 {
+            // In this case the range is contiguous
+            self.map_index_mapping(
+                col,
+                |col_storage| {
+                    let (start_inner_idx, end_inner_idx) = self
+                        .get_contiguous_range_storage_indices(
+                            col,
+                            slice.start as usize,
+                            slice.stop as usize,
+                        );
+                    match col_storage {
+                        ArchivedColumnStorage::I32(data) => {
+                            Box::new(data[start_inner_idx..end_inner_idx].iter().copied())
+                                as Box<dyn Iterator<Item = i32> + '_>
+                        }
+                        _ => panic!("get_i32_column_range called on non-i32 column"),
+                    }
+                },
+                |_concat_views: &[TableViewMem]| {
+                    let inner_ranges = self
+                        .get_contiguous_range_subviews(slice.start as usize, slice.stop as usize);
+                    Box::new(
+                        inner_ranges
+                            .into_iter()
+                            .flat_map(move |(subview, start, end)| {
+                                subview.get_i32_column_range(
+                                    col,
+                                    &PySliceIndices {
+                                        start: start as isize,
+                                        stop: end as isize,
+                                        step: 1,
+                                        slicelength: (end - start) as isize,
+                                    },
+                                )
+                            }),
+                    )
+                },
+                |_tgt_tbl, _indices| todo!("get_i32_column_range for direct indices mapping"),
+                |_tgt_tbl, _start, _end, _step| todo!("get_i32_column_range for Range"),
+            )
+        } else {
+            let indices = PySliceIter::new(slice);
+            Box::new(indices.flat_map(move |idx| self.get_i32_column_at_idx(col, idx)))
+        }
+    }
+
+    /// Get a range of a column, assuming the column dtype is i64.
+    fn get_i64_column_range(
+        &self,
+        col: usize,
+        slice: &PySliceIndices,
+    ) -> Box<dyn Iterator<Item = i64> + '_> {
+        if slice.slicelength == 0 {
+            return Box::new(std::iter::empty());
+        }
+        if slice.step == 1 {
+            // In this case the range is contiguous
+            self.map_index_mapping(
+                col,
+                |col_storage| {
+                    let (start_inner_idx, end_inner_idx) = self
+                        .get_contiguous_range_storage_indices(
+                            col,
+                            slice.start as usize,
+                            slice.stop as usize,
+                        );
+                    match col_storage {
+                        ArchivedColumnStorage::I64(data) => {
+                            Box::new(data[start_inner_idx..end_inner_idx].iter().copied())
+                                as Box<dyn Iterator<Item = i64> + '_>
+                        }
+                        _ => panic!("get_i64_column_range called on non-i64 column"),
+                    }
+                },
+                |_concat_views: &[TableViewMem]| {
+                    let inner_ranges = self
+                        .get_contiguous_range_subviews(slice.start as usize, slice.stop as usize);
+                    Box::new(
+                        inner_ranges
+                            .into_iter()
+                            .flat_map(move |(subview, start, end)| {
+                                subview.get_i64_column_range(
+                                    col,
+                                    &PySliceIndices {
+                                        start: start as isize,
+                                        stop: end as isize,
+                                        step: 1,
+                                        slicelength: (end - start) as isize,
+                                    },
+                                )
+                            }),
+                    )
+                },
+                |_tgt_tbl, _indices| todo!("get_i64_column_range for direct indices mapping"),
+                |_tgt_tbl, _start, _end, _step| todo!("get_i64_column_range for Range"),
+            )
+        } else {
+            let indices = PySliceIter::new(slice);
+            Box::new(indices.flat_map(move |idx| self.get_i64_column_at_idx(col, idx)))
+        }
+    }
+
+    /// Get a range of a column, assuming the column dtype is UString.
+    fn get_string_column_range(
+        &self,
+        col: usize,
+        slice: &PySliceIndices,
+    ) -> Box<dyn Iterator<Item = String> + '_> {
+        if slice.slicelength == 0 {
+            return Box::new(std::iter::empty());
+        }
+        if slice.step == 1 {
+            // In this case the range is contiguous
+            self.map_index_mapping(
+                col,
+                |col_storage| {
+                    let (start_inner_idx, end_inner_idx) = self
+                        .get_contiguous_range_storage_indices(
+                            col,
+                            slice.start as usize,
+                            slice.stop as usize,
+                        );
+                    match col_storage {
+                        ArchivedColumnStorage::UString(data) => Box::new(
+                            data[start_inner_idx..end_inner_idx]
+                                .iter()
+                                .map(|s| s.to_string()),
+                        )
+                            as Box<dyn Iterator<Item = String> + '_>,
+                        _ => panic!("get_string_column_range called on non-string column"),
+                    }
+                },
+                |_concat_views: &[TableViewMem]| {
+                    let inner_ranges = self
+                        .get_contiguous_range_subviews(slice.start as usize, slice.stop as usize);
+                    Box::new(
+                        inner_ranges
+                            .into_iter()
+                            .flat_map(move |(subview, start, end)| {
+                                subview.get_string_column_range(
+                                    col,
+                                    &PySliceIndices {
+                                        start: start as isize,
+                                        stop: end as isize,
+                                        step: 1,
+                                        slicelength: (end - start) as isize,
+                                    },
+                                )
+                            }),
+                    )
+                },
+                |_tgt_tbl, _indices| todo!("get_string_column_range for direct indices mapping"),
+                |_tgt_tbl, _start, _end, _step| todo!("get_string_column_range for Range"),
+            )
+        } else {
+            let indices = PySliceIter::new(slice);
+            Box::new(indices.flat_map(move |idx| self.get_string_column_at_idx(col, idx)))
+        }
     }
 
     /// For views with Concat IndexMappings, find the index of the sub-view and the index within
     /// that sub-view that contain a given index in the outer view.
-    fn get_subview_and_idx(&self, idx: usize) -> PyResult<(usize, usize)> {
+    fn get_subview_idx_and_inner_idx(&self, idx: usize) -> PyResult<(usize, usize)> {
         match &self.view.index_mapping {
             ArchivedIndexMapping::Concat(_views) => (),
-            _ => panic!("get_subview_and_idx called on non-concat view"),
+            _ => panic!("get_subview_idx_and_inner_idx called on non-concat view"),
         }
         let (concat_views, cum_lengths) = self
             .concat_views
@@ -537,6 +804,23 @@ impl TableViewMem {
         };
 
         Ok((subview_idx, inner_idx))
+    }
+
+    /// For views with Concat IndexMappings, find the sub-view and the index within that sub-view
+    /// that contain a given index in the outer view.
+    fn get_subview_and_idx(&self, idx: usize) -> PyResult<(&TableViewMem, usize)> {
+        let (subview_idx, inner_idx) = self.get_subview_idx_and_inner_idx(idx)?;
+        let subview = &self
+            .concat_views
+            .as_ref()
+            .expect("concat_views not set when IndexMapping is Concat")
+            .0[subview_idx];
+        Ok((subview, inner_idx))
+    }
+    /// The product of the dimensions of a column - i.e. the number of elements per row, 5*4 rows
+    /// have 20 elements
+    fn col_dims_product(&self, col: usize) -> usize {
+        self.desc.columns[col].dims.iter().product::<u64>() as usize
     }
 }
 
@@ -672,7 +956,6 @@ fn column_storage_from_pyarray(py: Python<'_>, array: &PyUntypedArray) -> PyResu
             ColumnStorage::UString(strs)
         }
     };
-    println!("storage from array: {:?}", &storage);
     Ok(storage)
 }
 
