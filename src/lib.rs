@@ -171,19 +171,18 @@ impl TableViewMem {
             }
             for (col, col_desc) in column_descs {
                 let col_name = col_desc.name.to_string();
-                let mut arr: &PyUntypedArray;
-                match col_desc.dtype {
+                let arr: &PyUntypedArray = match col_desc.dtype {
                     ArchivedDType::F32 => {
                         let iter = self.get_f32_column_at_idx(col, index);
-                        arr = np::PyArray::from_iter(py, iter).downcast().unwrap();
+                        np::PyArray::from_iter(py, iter).downcast().unwrap()
                     }
                     ArchivedDType::I32 => {
                         let iter = self.get_i32_column_at_idx(col, index);
-                        arr = np::PyArray::from_iter(py, iter).downcast().unwrap();
+                        np::PyArray::from_iter(py, iter).downcast().unwrap()
                     }
                     ArchivedDType::I64 => {
                         let iter = self.get_i64_column_at_idx(col, index);
-                        arr = np::PyArray::from_iter(py, iter).downcast().unwrap();
+                        np::PyArray::from_iter(py, iter).downcast().unwrap()
                     }
                     ArchivedDType::UString => {
                         let iter = self.get_string_column_at_idx(col, index);
@@ -191,18 +190,20 @@ impl TableViewMem {
                         let string_list = PyList::new(py, strings);
                         let np = py.import(intern!(py, "numpy")).unwrap();
                         let fun = np.getattr(intern!(py, "array")).unwrap();
-                        arr = fun.call1((string_list,)).unwrap().downcast().unwrap();
+                        fun.call1((string_list,)).unwrap().downcast().unwrap()
                     }
-                }
+                };
                 let dims: &[usize] = &col_desc
                     .dims
                     .iter()
                     .map(|&d| d as usize)
                     .collect::<Vec<usize>>();
                 if !dims.is_empty() {
-                    arr = reshape_pyuntypedarray(py, arr, dims).unwrap();
+                    out.set_item(col_name, reshape_pyuntypedarray(py, arr, dims).unwrap())
+                        .unwrap();
+                } else {
+                    out.set_item(col_name, arr.get_item(0).unwrap()).unwrap();
                 }
-                out.set_item(col_name, arr).unwrap();
             }
             Ok(out.into())
         } else if let Ok(slice) = index.downcast::<PySlice>() {

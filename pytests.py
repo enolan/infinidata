@@ -61,7 +61,9 @@ def test_single_indexing(tbl_view, request):
     for idx in [0, 5, 11]:
         view_dict = tbl_view[idx]
         for key in tbl_dict.keys():
-            np.testing.assert_array_equal(view_dict[key], tbl_dict[key][idx])
+            np.testing.assert_array_equal(
+                view_dict[key], tbl_dict[key][idx], strict=True
+            )
 
 
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
@@ -70,7 +72,9 @@ def test_simple_slicing(tbl_view, request):
     for idx_slice in [slice(0, 5), slice(5, 11), slice(11, 20)]:
         view_dict = tbl_view[idx_slice]
         for key in tbl_dict.keys():
-            np.testing.assert_array_equal(view_dict[key], tbl_dict[key][idx_slice])
+            np.testing.assert_array_equal(
+                view_dict[key], tbl_dict[key][idx_slice], strict=True
+            )
 
 
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
@@ -79,7 +83,9 @@ def test_slicing_with_step(tbl_view, request):
     for idx_slice in [slice(0, 5, 2), slice(5, 11, 3), slice(11, 20, 4)]:
         view_dict = tbl_view[idx_slice]
         for key in tbl_dict.keys():
-            np.testing.assert_array_equal(view_dict[key], tbl_dict[key][idx_slice])
+            np.testing.assert_array_equal(
+                view_dict[key], tbl_dict[key][idx_slice], strict=True
+            )
 
 
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
@@ -88,7 +94,9 @@ def test_slicing_with_negative_step(tbl_view, request):
     for idx_slice in [slice(5, 0, -1), slice(11, 5, -2), slice(20, 11, -3)]:
         view_dict = tbl_view[idx_slice]
         for key in tbl_dict.keys():
-            np.testing.assert_array_equal(view_dict[key], tbl_dict[key][idx_slice])
+            np.testing.assert_array_equal(
+                view_dict[key], tbl_dict[key][idx_slice], strict=True
+            )
 
 
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
@@ -97,7 +105,9 @@ def test_slicing_with_negative_start_and_stop(tbl_view, request):
     for idx_slice in [slice(-5, -1), slice(-11, -5), slice(-20, -11)]:
         view_dict = tbl_view[idx_slice]
         for key in tbl_dict.keys():
-            np.testing.assert_array_equal(view_dict[key], tbl_dict[key][idx_slice])
+            np.testing.assert_array_equal(
+                view_dict[key], tbl_dict[key][idx_slice], strict=True
+            )
 
 
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
@@ -106,7 +116,9 @@ def test_slicing_with_negative_start_stop_and_step(tbl_view, request):
     for idx_slice in [slice(-1, -5, -1), slice(-5, -11, -2), slice(-11, -20, -3)]:
         view_dict = tbl_view[idx_slice]
         for key in tbl_dict.keys():
-            np.testing.assert_array_equal(view_dict[key], tbl_dict[key][idx_slice])
+            np.testing.assert_array_equal(
+                view_dict[key], tbl_dict[key][idx_slice], strict=True
+            )
 
 
 @pytest.mark.xfail
@@ -120,7 +132,9 @@ def test_array_indexing(tbl_view, request):
     ]:
         view_dict = tbl_view[idx_array]
         for key in tbl_dict.keys():
-            np.testing.assert_array_equal(view_dict[key], tbl_dict[key][idx_array])
+            np.testing.assert_array_equal(
+                view_dict[key], tbl_dict[key][idx_array], strict=True
+            )
 
 
 # A set of concatenatable TableViews for testing the concat() method
@@ -192,7 +206,9 @@ def test_concat_single_indexing(concatable_tbl_views, request):
             inner_view_dict = inner_view[idx]
             assert list(concat_dict.keys()) == list(inner_view_dict.keys())
             for key in tbl_dicts[0].keys():
-                np.testing.assert_array_equal(concat_dict[key], inner_view_dict[key])
+                np.testing.assert_array_equal(
+                    concat_dict[key], inner_view_dict[key], strict=True
+                )
         start_idx += len(inner_view)
 
 
@@ -209,7 +225,7 @@ def test_concat_slice_all(concatable_tbl_views, request):
         for idx in range(len(inner_view)):
             for k in concat_dict_all.keys():
                 np.testing.assert_array_equal(
-                    concat_dict_all[k][start_idx + idx], inner_view[idx][k]
+                    concat_dict_all[k][start_idx + idx], inner_view[idx][k], strict=True
                 )
         start_idx += len(inner_view)
 
@@ -231,7 +247,9 @@ def test_concat_slice_inside(concatable_tbl_views, request):
             inner_slice = slice(idx_slice.start - start_idx, idx_slice.stop - start_idx)
             inner_dict = inner_view[inner_slice]
             for k in concat_dict.keys():
-                np.testing.assert_array_equal(concat_dict[k], inner_dict[k])
+                np.testing.assert_array_equal(
+                    concat_dict[k], inner_dict[k], strict=True
+                )
         start_idx += len(inner_view)
 
 
@@ -252,8 +270,8 @@ def test_concat_slice_across(concatable_tbl_views, request):
         last_dict = tbl_views[view_idx][len(tbl_views[view_idx]) - 1]
         first_dict = tbl_views[view_idx + 1][0]
         for k in concat_dict.keys():
-            np.testing.assert_array_equal(concat_dict[k][0], last_dict[k])
-            np.testing.assert_array_equal(concat_dict[k][1], first_dict[k])
+            np.testing.assert_array_equal(concat_dict[k][0], last_dict[k], strict=True)
+            np.testing.assert_array_equal(concat_dict[k][1], first_dict[k], strict=True)
         start_idx += len(tbl_views[view_idx])
 
 
@@ -285,7 +303,9 @@ def test_concat_array_indexing(concatable_tbl_views, request):
         inner_view, inner_idx = inner_indices[i]
         inner_dict = tbl_views[inner_view][inner_idx]
         for k in concat_array_dict.keys():
-            np.testing.assert_array_equal(concat_array_dict[k][i], inner_dict[k])
+            np.testing.assert_array_equal(
+                concat_array_dict[k][i], inner_dict[k], strict=True
+            )
 
 
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
@@ -306,7 +326,9 @@ def test_new_view_array_indexing(tbl_view, request):
     for i in range(n_samples):
         new_dict = new_view[i]
         for k in new_dict.keys():
-            np.testing.assert_array_equal(new_dict[k], tbl_dict[k][indices[i]])
+            np.testing.assert_array_equal(
+                new_dict[k], tbl_dict[k][indices[i]], strict=True
+            )
 
 
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
@@ -322,7 +344,8 @@ def test_new_view_slice_all(tbl_view, request):
 
     # Check that the new view has the correct data
     for k in new_view_dict.keys():
-        np.testing.assert_array_equal(new_view_dict[k], tbl_dict[k])
+        np.testing.assert_array_equal(new_view_dict[k], tbl_dict[k], strict=True)
+
 
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
 def test_new_view_slice_contiguous(tbl_view, request):
@@ -337,7 +360,8 @@ def test_new_view_slice_contiguous(tbl_view, request):
 
     # Check that the new view has the correct data
     for k in new_view_dict.keys():
-        np.testing.assert_array_equal(new_view_dict[k], tbl_dict[k][5:10])
+        np.testing.assert_array_equal(new_view_dict[k], tbl_dict[k][5:10], strict=True)
+
 
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
 def test_new_view_slice_noncontiguous(tbl_view, request):
@@ -352,4 +376,6 @@ def test_new_view_slice_noncontiguous(tbl_view, request):
 
     # Check that the new view has the correct data
     for k in new_view_dict.keys():
-        np.testing.assert_array_equal(new_view_dict[k], tbl_dict[k][3:15:3])
+        np.testing.assert_array_equal(
+            new_view_dict[k], tbl_dict[k][3:15:3], strict=True
+        )
