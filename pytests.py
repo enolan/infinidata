@@ -380,12 +380,13 @@ def test_new_view_slice_noncontiguous(tbl_view, request):
             new_view_dict[k], tbl_dict[k][3:15:3], strict=True
         )
 
+
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
 def test_new_view_slice_reverse(tbl_view, request):
     tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
 
     # Generate a new view
-    new_view = tbl_view.new_view(slice(None, None, -1)) # Equivalent to [::-1]
+    new_view = tbl_view.new_view(slice(None, None, -1))  # Equivalent to [::-1]
 
     # Check that the new view has the correct length
     assert len(new_view) == len(tbl_view)
@@ -394,8 +395,9 @@ def test_new_view_slice_reverse(tbl_view, request):
         new_dict = new_view[idx]
         for k in new_dict.keys():
             np.testing.assert_array_equal(
-                new_dict[k], tbl_dict[k][-idx-1], strict=True
+                new_dict[k], tbl_dict[k][-idx - 1], strict=True
             )
+
 
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
 def test_shuffle(tbl_view, request):
@@ -412,7 +414,10 @@ def test_shuffle(tbl_view, request):
     for i in range(len(tbl_view)):
         shuffled_dict = shuffled_view[i]
         for j in range(len(tbl_view)):
-            if all(np.array_equal(shuffled_dict[k], tbl_dict[k][j]) for k in shuffled_dict.keys()):
+            if all(
+                np.array_equal(shuffled_dict[k], tbl_dict[k][j])
+                for k in shuffled_dict.keys()
+            ):
                 found_rows[j] += 1
                 break
     assert np.all(found_rows == 1)
