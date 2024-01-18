@@ -9,6 +9,9 @@ name = "infinidata"
 crate-type = ["cdylib"]
 
 [dependencies]
+memmap = "0.7.0"
+numpy = "0.20.0"
+pyo3 = "0.20.1"
 rkyv = { version = "0.7.43", default-features = false, features = [
     "alloc",
     "size_64",
@@ -16,7 +19,4 @@ rkyv = { version = "0.7.43", default-features = false, features = [
     "uuid",
     "validation",
 ] }
-memmap = "0.7.0"
-numpy = "0.20.0"
-pyo3 = "0.20.1"
 uuid = { version = "1.6.1", features = ["v4"] }
