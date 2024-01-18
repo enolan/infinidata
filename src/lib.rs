@@ -488,7 +488,9 @@ impl TableViewMem {
     /// Get the values for a column at a given index, assuming the column dtype is f32.
     // AFAICT there's no way to get Rust's type system to let us make this generic over the dtype.
     // We could return untyped NumPy arrays but we want to avoid holding the GIL where possible.
-    // could theoretically use macros.
+    // Could theoretically use macros. Or, potentially better, make everything operate on byte
+    // arrays and push everything to cares about dtype up to the top level. Would make string
+    // handling more complicated...
     fn get_f32_column_at_idx(&self, col: usize, idx: usize) -> Box<dyn Iterator<Item = f32> + '_> {
         self.map_index_mapping(
             col,
