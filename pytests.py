@@ -1,8 +1,9 @@
 """Python tests for the Infinidata API."""
 
+import numpy as np
 import pytest
 import uuid
-import numpy as np
+
 import infinidata
 
 
@@ -285,3 +286,70 @@ def test_concat_array_indexing(concatable_tbl_views, request):
         inner_dict = tbl_views[inner_view][inner_idx]
         for k in concat_array_dict.keys():
             np.testing.assert_array_equal(concat_array_dict[k][i], inner_dict[k])
+
+
+@pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
+def test_new_view_array_indexing(tbl_view, request):
+    tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
+    n_samples = len(tbl_view) // 2
+
+    # Generate a set of random indices
+    indices = np.random.randint(0, len(tbl_view), size=(n_samples,))
+
+    # Generate a new view
+    new_view = tbl_view.new_view(indices)
+
+    # Check that the new view has the correct length
+    assert len(new_view) == n_samples
+
+    # Check that the new view has the correct data
+    for i in range(n_samples):
+        new_dict = new_view[i]
+        for k in new_dict.keys():
+            np.testing.assert_array_equal(new_dict[k], tbl_dict[k][indices[i]])
+
+
+@pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
+def test_new_view_slice_all(tbl_view, request):
+    tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
+
+    # Generate a new view
+    new_view = tbl_view.new_view(slice(None))
+    new_view_dict = new_view[:]
+
+    # Check that the new view has the correct length
+    assert len(new_view) == len(tbl_view)
+
+    # Check that the new view has the correct data
+    for k in new_view_dict.keys():
+        np.testing.assert_array_equal(new_view_dict[k], tbl_dict[k])
+
+@pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
+def test_new_view_slice_contiguous(tbl_view, request):
+    tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
+
+    # Generate a new view
+    new_view = tbl_view.new_view(slice(5, 10))
+    new_view_dict = new_view[:]
+
+    # Check that the new view has the correct length
+    assert len(new_view) == 5
+
+    # Check that the new view has the correct data
+    for k in new_view_dict.keys():
+        np.testing.assert_array_equal(new_view_dict[k], tbl_dict[k][5:10])
+
+@pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
+def test_new_view_slice_noncontiguous(tbl_view, request):
+    tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
+
+    # Generate a new view
+    new_view = tbl_view.new_view(slice(3, 15, 3))
+    new_view_dict = new_view[:]
+
+    # Check that the new view has the correct length
+    assert len(new_view) == 4
+
+    # Check that the new view has the correct data
+    for k in new_view_dict.keys():
+        np.testing.assert_array_equal(new_view_dict[k], tbl_dict[k][3:15:3])

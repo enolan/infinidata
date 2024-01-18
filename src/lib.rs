@@ -87,6 +87,14 @@ struct TableView {
     index_mapping: IndexMapping,
 }
 
+impl TableView {
+    fn make_mmapped(&self) -> MmapArchived<TableView> {
+        let path: PathBuf = format!("TableView-{}.bin", self.uuid).into();
+        let file = write_serialize(self, &path).unwrap();
+        load_archived::<TableView>(file, &path).unwrap()
+    }
+}
+
 /// A mapping from the indices in a view to the indices in a table
 #[derive(Archive, Clone, Debug, Deserialize, Serialize)]
 #[archive(check_bytes)]
@@ -134,9 +142,7 @@ impl TableViewMem {
             desc_uuid: desc.uuid,
             index_mapping: IndexMapping::Storage(storage.uuid),
         };
-        let path: PathBuf = format!("TableView-{}.bin", view.uuid).into();
-        let file = write_serialize(&view, &path).unwrap();
-        let view_archived = load_archived::<TableView>(file, &path).unwrap();
+        let view_archived = view.make_mmapped();
         let ncols = desc.columns.len();
         TableViewMem {
             view: Arc::new(view_archived),
@@ -270,15 +276,13 @@ impl TableViewMem {
                     .expect("concat_views not set when IndexMapping is Concat");
                 *cum_lengths.last().unwrap()
             }
-            ArchivedIndexMapping::Indices(_view_uuid, _indices) => {
-                todo!("len for direct indices mapping")
-            }
+            ArchivedIndexMapping::Indices(_view_uuid, indices) => indices.len(),
             ArchivedIndexMapping::Range {
                 table_uuid: _,
-                start: _,
-                end: _,
-                step: _,
-            } => todo!("range len"),
+                start,
+                end,
+                step,
+            } => ((end - start) / step) as usize,
         }
     }
 
@@ -321,9 +325,7 @@ impl TableViewMem {
             cum_lengths.push(cum_length);
         }
 
-        let path: PathBuf = format!("TableView-{}.bin", table_view.uuid).into();
-        let file = write_serialize(&table_view, &path).unwrap();
-        let table_view_archived = load_archived::<TableView>(file, &path).unwrap();
+        let table_view_archived = table_view.make_mmapped();
         Ok(TableViewMem {
             view: Arc::new(table_view_archived),
             desc: Arc::clone(&views[0].extract::<PyRef<Self>>()?.desc),
@@ -332,6 +334,63 @@ impl TableViewMem {
             referenced_view: None,
             live_columns: (0..all_desc.columns.len()).collect(),
         })
+    }
+
+    /// Make a new TableView from an existing one, remapping the indices either using an index
+    /// array or a range.
+    fn new_view(&self, mapping: &PyAny) -> PyResult<Self> {
+        let py = mapping.py();
+        if let Ok(idx_array) = mapping.downcast::<PyArray1<i64>>() {
+            let idx_array = make_contiguous(py, idx_array)
+                .downcast::<PyArray1<i64>>()
+                .unwrap()
+                .readonly();
+            let idx_vec = idx_array
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|&i| i as usize)
+                .collect::<Vec<usize>>();
+            let table_view = TableView {
+                uuid: Uuid::new_v4(),
+                desc_uuid: self.desc.uuid,
+                index_mapping: IndexMapping::Indices(self.view.uuid, idx_vec),
+            };
+            let table_view_archived = table_view.make_mmapped();
+            Ok(TableViewMem {
+                view: Arc::new(table_view_archived),
+                desc: Arc::clone(&self.desc),
+                storage: None,
+                concat_views: None,
+                referenced_view: Some(Box::new(self.clone())),
+                live_columns: self.live_columns.clone(),
+            })
+        } else if let Ok(slice) = mapping.downcast::<PySlice>() {
+            let slice_idxs = slice.indices(self.len() as i64)?;
+            let table_view = TableView {
+                uuid: Uuid::new_v4(),
+                desc_uuid: self.desc.uuid,
+                index_mapping: IndexMapping::Range {
+                    table_uuid: self.view.uuid,
+                    start: slice_idxs.start as usize,
+                    end: slice_idxs.stop as usize,
+                    step: slice_idxs.step as usize,
+                },
+            };
+            let table_view_archived = table_view.make_mmapped();
+            Ok(TableViewMem {
+                view: Arc::new(table_view_archived),
+                desc: Arc::clone(&self.desc),
+                storage: None,
+                concat_views: None,
+                referenced_view: Some(Box::new(self.clone())),
+                live_columns: self.live_columns.clone(),
+            })
+        } else {
+            Err(pyo3::exceptions::PyTypeError::new_err(
+                "Index must be a slice or NumPy array of integers",
+            ))
+        }
     }
 }
 
@@ -415,8 +474,8 @@ impl TableViewMem {
                 let (subview, inner_idx) = self.get_subview_and_idx(idx).unwrap();
                 subview.get_f32_column_at_idx(col, inner_idx)
             },
-            |_tgt_tbl, _indices| todo!("get_f32_column_at_idx for direct indices mapping"),
-            |_tgt_tbl, _start, _end, _step| todo!("get_f32_column_at_idx for Range"),
+            |tgt_tbl, indices| tgt_tbl.get_f32_column_at_idx(col, indices[idx] as usize),
+            |tgt_tbl, start, _end, step| tgt_tbl.get_f32_column_at_idx(col, start + idx * step),
         )
     }
 
@@ -438,8 +497,8 @@ impl TableViewMem {
                 let (subview, inner_idx) = self.get_subview_and_idx(idx).unwrap();
                 subview.get_i32_column_at_idx(col, inner_idx)
             },
-            |_tgt_tbl, _indices| todo!("get_i32_column_at_idx for direct indices mapping"),
-            |_tgt_tbl, _start, _end, _step| todo!("get_i32_column_at_idx for Range"),
+            |tgt_tbl, indices| tgt_tbl.get_i32_column_at_idx(col, indices[idx] as usize),
+            |tgt_tbl, start, _end, step| tgt_tbl.get_i32_column_at_idx(col, start + idx * step),
         )
     }
 
@@ -461,8 +520,8 @@ impl TableViewMem {
                 let (subview, inner_idx) = self.get_subview_and_idx(idx).unwrap();
                 subview.get_i64_column_at_idx(col, inner_idx)
             },
-            |_tgt_tbl, _indices| todo!("get_i64_column_at_idx for direct indices mapping"),
-            |_tgt_tbl, _start, _end, _step| todo!("get_i64_column_at_idx for Range"),
+            |tgt_tbl, indices| tgt_tbl.get_i64_column_at_idx(col, indices[idx] as usize),
+            |tgt_tbl, start, _end, step| tgt_tbl.get_i64_column_at_idx(col, start + idx * step),
         )
     }
 
@@ -490,8 +549,8 @@ impl TableViewMem {
                 let (subview, inner_idx) = self.get_subview_and_idx(idx).unwrap();
                 subview.get_string_column_at_idx(col, inner_idx)
             },
-            |_tgt_tbl, _indices| todo!("get_string_column_at_idx for direct indices mapping"),
-            |_tgt_tbl, _start, _end, _step| todo!("get_string_column_at_idx for Range"),
+            |tgt_tbl, indices| tgt_tbl.get_string_column_at_idx(col, indices[idx] as usize),
+            |tgt_tbl, start, _end, step| tgt_tbl.get_string_column_at_idx(col, start + idx * step),
         )
     }
 
@@ -548,6 +607,13 @@ impl TableViewMem {
         if slice.slicelength == 0 {
             return Box::new(std::iter::empty());
         }
+
+        // Fallback if clever strategies don't work
+        let fallback = || {
+            let indices = PySliceIter::new(slice);
+            Box::new(indices.flat_map(move |idx| self.get_f32_column_at_idx(col, idx)))
+        };
+
         if slice.step == 1 {
             // In this case the range is contiguous
             self.map_index_mapping(
@@ -587,11 +653,29 @@ impl TableViewMem {
                     )
                 },
                 |_tgt_tbl, _indices| todo!("get_f32_column_range for direct indices mapping"),
-                |_tgt_tbl, _start, _end, _step| todo!("get_f32_column_range for Range"),
+                |tgt_tbl, inner_start, _inner_end, inner_step| {
+                    if inner_step == 1 {
+                        // If the inner range is contiguous then we can just use the same range
+                        // with an offset
+                        let start = slice.start as usize + inner_start;
+                        let end = slice.stop as usize + inner_start;
+                        Box::new(tgt_tbl.get_f32_column_range(
+                            col,
+                            &PySliceIndices {
+                                start: start as isize,
+                                stop: end as isize,
+                                step: 1,
+                                slicelength: (end - start) as isize,
+                            },
+                        ))
+                    } else {
+                        // Otherwise we have to do a fallback
+                        fallback()
+                    }
+                },
             )
         } else {
-            let indices = PySliceIter::new(slice);
-            Box::new(indices.flat_map(move |idx| self.get_f32_column_at_idx(col, idx)))
+            fallback()
         }
     }
 
@@ -604,6 +688,13 @@ impl TableViewMem {
         if slice.slicelength == 0 {
             return Box::new(std::iter::empty());
         }
+
+        // Fallback if clever strategies don't work
+        let fallback = || {
+            let indices = PySliceIter::new(slice);
+            Box::new(indices.flat_map(move |idx| self.get_i32_column_at_idx(col, idx)))
+        };
+
         if slice.step == 1 {
             // In this case the range is contiguous
             self.map_index_mapping(
@@ -643,11 +734,29 @@ impl TableViewMem {
                     )
                 },
                 |_tgt_tbl, _indices| todo!("get_i32_column_range for direct indices mapping"),
-                |_tgt_tbl, _start, _end, _step| todo!("get_i32_column_range for Range"),
+                |tgt_tbl, inner_start, _inner_end, inner_step| {
+                    if inner_step == 1 {
+                        // If the inner range is contiguous then we can just use the same range
+                        // with an offset
+                        let start = slice.start as usize + inner_start;
+                        let end = slice.stop as usize + inner_start;
+                        Box::new(tgt_tbl.get_i32_column_range(
+                            col,
+                            &PySliceIndices {
+                                start: start as isize,
+                                stop: end as isize,
+                                step: 1,
+                                slicelength: (end - start) as isize,
+                            },
+                        ))
+                    } else {
+                        // Otherwise we have to do a fallback
+                        fallback()
+                    }
+                },
             )
         } else {
-            let indices = PySliceIter::new(slice);
-            Box::new(indices.flat_map(move |idx| self.get_i32_column_at_idx(col, idx)))
+            fallback()
         }
     }
 
@@ -660,6 +769,13 @@ impl TableViewMem {
         if slice.slicelength == 0 {
             return Box::new(std::iter::empty());
         }
+
+        // Fallback if clever strategies don't work
+        let fallback = || {
+            let indices = PySliceIter::new(slice);
+            Box::new(indices.flat_map(move |idx| self.get_i64_column_at_idx(col, idx)))
+        };
+
         if slice.step == 1 {
             // In this case the range is contiguous
             self.map_index_mapping(
@@ -699,11 +815,29 @@ impl TableViewMem {
                     )
                 },
                 |_tgt_tbl, _indices| todo!("get_i64_column_range for direct indices mapping"),
-                |_tgt_tbl, _start, _end, _step| todo!("get_i64_column_range for Range"),
+                |tgt_tbl, inner_start, _inner_end, inner_step| {
+                    if inner_step == 1 {
+                        // If the inner range is contiguous then we can just use the same range
+                        // with an offset
+                        let start = slice.start as usize + inner_start;
+                        let end = slice.stop as usize + inner_start;
+                        Box::new(tgt_tbl.get_i64_column_range(
+                            col,
+                            &PySliceIndices {
+                                start: start as isize,
+                                stop: end as isize,
+                                step: 1,
+                                slicelength: (end - start) as isize,
+                            },
+                        ))
+                    } else {
+                        // Otherwise we have to do a fallback
+                        fallback()
+                    }
+                },
             )
         } else {
-            let indices = PySliceIter::new(slice);
-            Box::new(indices.flat_map(move |idx| self.get_i64_column_at_idx(col, idx)))
+            fallback()
         }
     }
 
@@ -716,6 +850,13 @@ impl TableViewMem {
         if slice.slicelength == 0 {
             return Box::new(std::iter::empty());
         }
+
+        // Fallback if clever strategies don't work
+        let fallback = || {
+            let indices = PySliceIter::new(slice);
+            Box::new(indices.flat_map(move |idx| self.get_string_column_at_idx(col, idx)))
+        };
+
         if slice.step == 1 {
             // In this case the range is contiguous
             self.map_index_mapping(
@@ -757,11 +898,29 @@ impl TableViewMem {
                     )
                 },
                 |_tgt_tbl, _indices| todo!("get_string_column_range for direct indices mapping"),
-                |_tgt_tbl, _start, _end, _step| todo!("get_string_column_range for Range"),
+                |tgt_tbl, inner_start, _inner_end, inner_step| {
+                    if inner_step == 1 {
+                        // If the inner range is contiguous then we can just use the same range
+                        // with an offset
+                        let start = slice.start as usize + inner_start;
+                        let end = slice.stop as usize + inner_start;
+                        Box::new(tgt_tbl.get_string_column_range(
+                            col,
+                            &PySliceIndices {
+                                start: start as isize,
+                                stop: end as isize,
+                                step: 1,
+                                slicelength: (end - start) as isize,
+                            },
+                        ))
+                    } else {
+                        // Otherwise we have to do a fallback
+                        fallback()
+                    }
+                },
             )
         } else {
-            let indices = PySliceIter::new(slice);
-            Box::new(indices.flat_map(move |idx| self.get_string_column_at_idx(col, idx)))
+            fallback()
         }
     }
 
