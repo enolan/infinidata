@@ -22,6 +22,7 @@ use std::cmp::{min, Ordering};
 use std::env;
 use std::fs;
 use std::fs::File;
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -1446,7 +1447,7 @@ mod tests {
 use py_slice_iter::*;
 
 type FileSerializer = CompositeSerializer<
-    WriteSerializer<File>,
+    WriteSerializer<BufWriter<File>>,
     FallbackScratch<HeapScratch<4096>, AllocScratch>,
     SharedSerializeMap,
 >;
@@ -1461,15 +1462,18 @@ where
         .write(true)
         .create_new(true)
         .open(path)?;
-    let write_ser = WriteSerializer::new(file);
+    let writer = BufWriter::with_capacity(4 * 1024 * 1024, file);
+    let write_ser = WriteSerializer::new(writer);
     let scratch = FallbackScratch::new(HeapScratch::new(), AllocScratch::new());
     let mut ser = CompositeSerializer::new(write_ser, scratch, SharedSerializeMap::new());
     ser.serialize_value(data).map_or_else(
         |e| Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
         |_| Ok(()),
     )?;
-    // file was moved into ser, so we need to move it back out
-    let file = ser.into_components().0.into_inner();
+    // the file was moved into the bufwriter, and the bufwriter was moved into write_ser, so we
+    // need to get them back out to return the file.
+    let writer = ser.into_components().0.into_inner();
+    let file = writer.into_inner().unwrap();
     let mut perms = file.metadata()?.permissions();
     perms.set_readonly(true);
     file.set_permissions(perms)?;
