@@ -471,6 +471,32 @@ impl TableViewMem {
             batch_idx: 0,
         })
     }
+
+    /// Select the columns to be viewed, returning a new TableView. Subscripting the TableView and
+    /// using batch_iter will return dicts with only those columns.
+    fn select_columns(&self, columns: &PySet) -> PyResult<Self> {
+        let mut live_columns = Vec::new();
+        for col in columns.iter() {
+            let col = col.extract::<String>()?;
+            let col_idx = self
+                .desc
+                .columns
+                .iter()
+                .position(|c| c.name == col)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!("No such column: {}", col))
+                })?;
+            live_columns.push(col_idx);
+        }
+        Ok(TableViewMem {
+            view: Arc::clone(&self.view),
+            desc: Arc::clone(&self.desc),
+            storage: self.storage.clone(),
+            concat_views: self.concat_views.clone(),
+            referenced_view: self.referenced_view.clone(),
+            live_columns,
+        })
+    }
 }
 
 impl TableViewMem {

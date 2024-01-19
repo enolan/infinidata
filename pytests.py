@@ -456,3 +456,27 @@ def test_batch_iter_no_drop_last(tbl_view, request):
             )
 
     assert batch_cnt == len(tbl_view) // 5 + (1 if len(tbl_view) % 5 != 0 else 0)
+
+@pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
+def test_select_columns(tbl_view, request):
+    tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
+
+    # Select a subset of columns
+    selected_cols = set()
+
+    for i, k in enumerate(tbl_dict.keys()):
+        if i % 2 == 0:
+            selected_cols.add(k)
+    selected_view = tbl_view.select_columns(selected_cols)
+
+    # Check that the selected view has the correct length
+    assert len(selected_view) == len(tbl_view)
+
+    # Check that the selected view has the correct data
+    for i in range(len(tbl_view)):
+        selected_dict = selected_view[i]
+        assert set(selected_dict.keys()) == selected_cols
+        for k in selected_dict.keys():
+            np.testing.assert_array_equal(
+                selected_dict[k], tbl_dict[k][i], strict=True
+            )
