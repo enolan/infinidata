@@ -427,7 +427,8 @@ impl TableViewMem {
 
     /// Shuffles the rows of a TableView. N.b. this will use enough memory to make a complete
     /// index array. An offline approach is possible if you have an absurd number of rows, but not
-    /// implemented.
+    /// implemented. The memory is freed after the shuffle is complete - the generated index array
+    /// is stored on disk.
     fn shuffle(&self, seed: Option<u64>) -> PyResult<Self> {
         let indices: &mut [usize] = &mut (0..self.len()).collect::<Vec<usize>>();
         match seed {
