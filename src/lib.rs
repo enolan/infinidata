@@ -399,7 +399,6 @@ impl TableViewMem {
             })
         } else if let Ok(slice) = mapping.downcast::<PySlice>() {
             let slice_idxs = slice.indices(self.len() as i64)?;
-            println!("slice_idxs: {:?}", slice_idxs);
             let table_view = TableView {
                 uuid: Uuid::new_v4(),
                 desc_uuid: self.desc.uuid,
