@@ -457,6 +457,7 @@ def test_batch_iter_no_drop_last(tbl_view, request):
 
     assert batch_cnt == len(tbl_view) // 5 + (1 if len(tbl_view) % 5 != 0 else 0)
 
+
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
 def test_select_columns(tbl_view, request):
     tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
@@ -477,6 +478,39 @@ def test_select_columns(tbl_view, request):
         selected_dict = selected_view[i]
         assert set(selected_dict.keys()) == selected_cols
         for k in selected_dict.keys():
-            np.testing.assert_array_equal(
-                selected_dict[k], tbl_dict[k][i], strict=True
-            )
+            np.testing.assert_array_equal(selected_dict[k], tbl_dict[k][i], strict=True)
+
+
+def test_remove_matching_strings():
+    tbl_dict = {
+        "foo": np.array([str(i) for i in range(100)]),
+        "bar": np.arange(100)[::-1],
+    }
+    tbl_view = infinidata.TableView(tbl_dict)
+
+    blacklist_set = {"foo", "3", "11", "40"}
+    tbl_view_filtered = tbl_view.remove_matching_strings("foo", blacklist_set)
+
+    assert len(tbl_view_filtered) == len(tbl_view) - 3
+
+    filtered_dict = tbl_view_filtered[:]
+
+    for i in range(len(tbl_view_filtered)):
+        # Check that this row does not have a blacklisted string in the foo column
+        assert filtered_dict["foo"][i] not in blacklist_set
+
+        # Check that this row matches the original table by finding the matching idx in the
+        # original table.
+        matching_idx = i
+        while True:
+            matches = True
+            for k in filtered_dict.keys():
+                if filtered_dict[k][i] != tbl_dict[k][matching_idx]:
+                    matches = False
+                    break
+            if matches:
+                break
+            matching_idx += 1
+            assert matching_idx < len(
+                tbl_view
+            ), f"Couldn't find a matching row for {i} in the original table"

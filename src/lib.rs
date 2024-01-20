@@ -19,6 +19,7 @@ use rkyv::validation::validators::{check_archived_root, DefaultValidator};
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 use std::any::type_name;
 use std::cmp::{min, Ordering};
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -495,6 +496,66 @@ impl TableViewMem {
             concat_views: self.concat_views.clone(),
             referenced_view: self.referenced_view.clone(),
             live_columns,
+        })
+    }
+
+    /// Remove rows from the table where a given string column matches an element of a given set.
+    /// This materializes the full set of retained indices in memory, so it's not suitable for
+    /// obscenely large numbers of rows. An offline approach is possible, but not implemented.
+    fn remove_matching_strings(
+        &self,
+        column: &str,
+        strings_to_remove: HashSet<String>,
+    ) -> PyResult<Self> {
+        let col_idx = self
+            .desc
+            .columns
+            .iter()
+            .position(|c| c.name == column)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!("No such column: {}", column))
+            })?;
+        match self.desc.columns[col_idx].dtype {
+            ArchivedDType::UString => {}
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Column must be a string column",
+                ))
+            }
+        }
+
+        // 50% keep rate seems vaguely reasonable? My actual duplicate blacklists probably keep
+        // more like 99% but that seems like an excessive amount of allocation. shrug emoji.
+        let mut retained_indices = Vec::with_capacity(self.len() / 2);
+
+        let slice_all = PySliceIndices {
+            start: 0,
+            stop: self.len() as isize,
+            step: 1,
+            slicelength: self.len() as isize,
+        };
+        for (i, str_val) in self
+            .get_string_column_range(col_idx, &slice_all)
+            .enumerate()
+        {
+            if !strings_to_remove.contains(&str_val) {
+                retained_indices.push(i);
+            }
+        }
+
+        let table_view = TableView {
+            uuid: Uuid::new_v4(),
+            desc_uuid: self.desc.uuid,
+            index_mapping: IndexMapping::Indices(self.view.uuid, retained_indices),
+        };
+        let table_view_archived = unsafe { make_mmapped(&table_view) };
+        Ok(TableViewMem {
+            view: Arc::new(table_view_archived),
+            desc: Arc::clone(&self.desc),
+            storage: None,
+            concat_views: None,
+            referenced_view: Some(Box::new(self.clone())),
+            live_columns: self.live_columns.clone(),
         })
     }
 }
