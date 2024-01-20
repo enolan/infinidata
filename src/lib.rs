@@ -1730,11 +1730,11 @@ impl BatchIter {
                     };
 
                     let mvar = Arc::new(Mvar::empty());
-                    work_tx.send((slice, Arc::clone(&mvar))).unwrap();
-                    match result_tx.send(mvar) {
+                    match result_tx.send(Arc::clone(&mvar)) {
                         Ok(()) => (),
                         Err(_) => break, // result_rx has been dropped, which means the iterator has been dropped
                     }
+                    work_tx.send((slice, mvar)).unwrap();
 
                     batch_idx += 1;
                 }
