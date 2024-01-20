@@ -546,3 +546,80 @@ def test_remove_matching_strings():
             assert matching_idx < len(
                 tbl_view
             ), f"Couldn't find a matching row for {i} in the original table"
+
+
+@pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
+def test_simple_save_load(tbl_view, request, tmp_path):
+    tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
+
+    # Save the table
+    tbl_view.save_to_disk(tmp_path, "test_table")
+
+    # Load the table
+    loaded_view = infinidata.TableView.load_from_disk(tmp_path, "test_table")
+
+    # Check that the loaded table has the correct length
+    assert len(loaded_view) == len(tbl_view)
+
+    # Check that the loaded table has the correct data
+    for i in range(len(tbl_view)):
+        loaded_dict = loaded_view[i]
+        for k in loaded_dict.keys():
+            np.testing.assert_array_equal(loaded_dict[k], tbl_dict[k][i], strict=True)
+
+
+@pytest.mark.parametrize("concatable_tbl_views", concatable_combos)
+def test_concat_save_load(concatable_tbl_views, request, tmp_path):
+    tbl_views_and_dicts = [
+        request.getfixturevalue(tbl_view) for tbl_view in concatable_tbl_views
+    ]
+    tbl_views = [tbl_view[0] for tbl_view in tbl_views_and_dicts]
+    tbl_dicts = [tbl_view[1] for tbl_view in tbl_views_and_dicts]
+
+    # Concatenate the tables
+    concat_view = infinidata.TableView.concat(tbl_views)
+
+    # Save the table
+    concat_view.save_to_disk(tmp_path, "test_table")
+
+    # Load the table
+    loaded_view = infinidata.TableView.load_from_disk(tmp_path, "test_table")
+
+    # Check that the loaded table has the correct length
+    assert len(loaded_view) == len(concat_view)
+
+    # Check that the loaded table has the correct data
+    start_idx = 0
+    for inner_view in tbl_views:
+        for i in range(len(inner_view)):
+            loaded_dict = loaded_view[start_idx + i]
+            inner_dict = inner_view[i]
+            assert list(loaded_dict.keys()) == list(inner_dict.keys())
+            for k in loaded_dict.keys():
+                np.testing.assert_array_equal(
+                    loaded_dict[k], inner_dict[k], strict=True
+                )
+        start_idx += len(inner_view)
+
+
+@pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
+def test_save_load_array_indexing(tbl_view, request, tmp_path):
+    tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
+    tbl_view = tbl_view.new_view(np.arange(len(tbl_view))[::-1])
+
+    # Save the table
+    tbl_view.save_to_disk(tmp_path, "test_table")
+
+    # Load the table
+    loaded_view = infinidata.TableView.load_from_disk(tmp_path, "test_table")
+
+    # Check that the loaded table has the correct length
+    assert len(loaded_view) == len(tbl_view)
+
+    # Check that the loaded table has the correct data
+    for i in range(len(tbl_view)):
+        loaded_dict = loaded_view[i]
+        for k in loaded_dict.keys():
+            np.testing.assert_array_equal(
+                loaded_dict[k], tbl_dict[k][len(tbl_view) - i - 1], strict=True
+            )

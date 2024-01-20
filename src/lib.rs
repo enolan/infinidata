@@ -26,6 +26,7 @@ use std::env;
 use std::fs;
 use std::fs::File;
 use std::io::BufWriter;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -599,9 +600,250 @@ impl TableViewMem {
             live_columns: self.live_columns.clone(),
         })
     }
+
+    /// Save a TableView to disk. Provide a directory and a name, and the TableView along with all
+    /// its dependencies will be hardlinked (or copied if the original backing storage is on a
+    /// different fs) in that directory. This is smart enough to avoid duplicating data, so if you
+    /// save two TableViews that share a backing storage, the storage will only be saved once.
+    ///
+    /// THE INFINIDATA DISK FORMAT IS NOT STABLE. This function exists for caching, not permanent
+    /// storage. If you want to save data permanently, use a different format.
+    fn save_to_disk(&self, dir: PathBuf, filename: Option<PathBuf>) -> PyResult<()> {
+        match fs::create_dir_all(&dir) {
+            Ok(_) => {}
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::AlreadyExists => {}
+                _ => {
+                    return Err(pyo3::exceptions::PyOSError::new_err(format!(
+                        "Error creating directory {}: {}",
+                        dir.display(),
+                        e
+                    )))
+                }
+            },
+        }
+
+        let mut names_to_link: Vec<(&Path, PathBuf)> = Vec::with_capacity(3);
+        names_to_link.extend_from_slice(&[
+            (&self.view.fname, get_storage_name_mmapped(&self.view)),
+            (&self.desc.fname, get_storage_name_mmapped(&self.desc)),
+        ]);
+        if let Some(storage) = &self.storage {
+            names_to_link.push((&storage.fname, get_storage_name_mmapped(storage)));
+        }
+        for (old_path, new_path) in names_to_link {
+            let new_path = dir.join(new_path);
+            let old_dev = old_path.metadata()?.dev();
+            let new_dev = dir.metadata()?.dev();
+
+            if new_path.exists() {
+                // If the file already exists, we're done.
+                continue;
+            }
+
+            let copy_res = if old_dev == new_dev {
+                fs::hard_link(old_path, &new_path)
+            } else {
+                fs::copy(old_path, &new_path).map(|_size| ())
+            };
+
+            match copy_res {
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(pyo3::exceptions::PyOSError::new_err(format!(
+                        "Error copying {} to {}: {}",
+                        old_path.display(),
+                        new_path.display(),
+                        e
+                    )))
+                }
+            }
+        }
+
+        let mut inner_views: Vec<&TableViewMem> = Vec::new();
+        if let Some((concat_views, _cum_lengths)) = &self.concat_views {
+            inner_views.extend(concat_views);
+        }
+        if let Some(referenced_view) = &self.referenced_view {
+            inner_views.push(referenced_view);
+        }
+
+        for inner_view in inner_views {
+            inner_view.save_to_disk(dir.clone(), None)?;
+        }
+
+        if let Some(filename) = filename {
+            let filename = dir.join(filename);
+            fs::write(filename, self.view.uuid.to_string())?;
+        }
+
+        Ok(())
+    }
+
+    /// Load a TableView from disk. Provide a directory and a name, and the TableView along with
+    /// its dependencies will be mapped. Again, THE INFINIDATA DISK FORMAT IS NOT STABLE.
+    #[staticmethod]
+    fn load_from_disk(dir: PathBuf, filename: PathBuf) -> PyResult<Self> {
+        let uuid_path = dir.join(filename);
+        let uuid_str = fs::read_to_string(uuid_path)?;
+        let view_uuid = Uuid::parse_str(&uuid_str).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Error parsing UUID from {}: {}",
+                uuid_str, e
+            ))
+        })?;
+
+        let mut views: HashMap<Uuid, Arc<MmapArchived<TableView>>> = HashMap::new();
+        let mut descs: HashMap<Uuid, Arc<MmapArchived<TableDesc>>> = HashMap::new();
+        let mut storages: HashMap<Uuid, Arc<MmapArchived<TableStorage>>> = HashMap::new();
+
+        Self::mmap_from_disk_rec(&dir, view_uuid, &mut views, &mut descs, &mut storages)?;
+
+        let mut view_mems: HashMap<Uuid, TableViewMem> = HashMap::new();
+        let view_mem = Self::from_mmap_rec(view_uuid, &views, &descs, &storages, &mut view_mems);
+        Ok(view_mem)
+    }
 }
 
 impl TableViewMem {
+    /// Given a view UUID, load it and all its dependencies from disk, storing them in a set of
+    /// HashMaps.
+    fn mmap_from_disk_rec(
+        dir: &Path,
+        view_uuid: Uuid,
+        views: &mut HashMap<Uuid, Arc<MmapArchived<TableView>>>,
+        descs: &mut HashMap<Uuid, Arc<MmapArchived<TableDesc>>>,
+        storages: &mut HashMap<Uuid, Arc<MmapArchived<TableStorage>>>,
+    ) -> PyResult<()> {
+        if let Some(_view) = views.get(&view_uuid) {
+            // If it's already loaded, we're done.
+            return Ok(());
+        };
+        // Otherwise, load it and its dependencies. Ensure all dependencies are in the
+        // HashMaps before inserting the view itself.
+        let view_path = PathBuf::from(dir).join(get_storage_name_from_type::<TableView>(view_uuid));
+        let view_file = fs::File::open(&view_path)?;
+        let view_archived: MmapArchived<TableView> =
+            MmapArchived::new(view_file, &view_path, false)
+                .map_err(pyo3::exceptions::PyOSError::new_err)?;
+
+        match descs.get(&view_archived.desc_uuid) {
+            Some(_desc) => {}
+            None => {
+                let desc_path = PathBuf::from(dir).join(get_storage_name_from_type::<TableDesc>(
+                    view_archived.desc_uuid,
+                ));
+                let desc_file = fs::File::open(&desc_path)?;
+                let desc_archived: MmapArchived<TableDesc> =
+                    MmapArchived::new(desc_file, &desc_path, false)
+                        .map_err(pyo3::exceptions::PyOSError::new_err)?;
+                descs.insert(view_archived.desc_uuid, Arc::new(desc_archived));
+            }
+        };
+
+        match &view_archived.index_mapping {
+            ArchivedIndexMapping::Storage(storage_uuid) => match storages.get(storage_uuid) {
+                Some(_) => {}
+                None => {
+                    let storage_path = PathBuf::from(dir)
+                        .join(get_storage_name_from_type::<TableStorage>(*storage_uuid));
+                    let storage_file = fs::File::open(&storage_path)?;
+                    let storage_archived: MmapArchived<TableStorage> =
+                        MmapArchived::new(storage_file, &storage_path, false)
+                            .map_err(pyo3::exceptions::PyOSError::new_err)?;
+                    storages.insert(*storage_uuid, Arc::new(storage_archived));
+                }
+            },
+            ArchivedIndexMapping::Concat(view_uuids) => {
+                for view_uuid in view_uuids.iter() {
+                    Self::mmap_from_disk_rec(dir, *view_uuid, views, descs, storages)?;
+                }
+            }
+            ArchivedIndexMapping::Indices(view_uuid, _indices) => {
+                Self::mmap_from_disk_rec(dir, *view_uuid, views, descs, storages)?;
+            }
+            ArchivedIndexMapping::Range { table_uuid, .. } => {
+                Self::mmap_from_disk_rec(dir, *table_uuid, views, descs, storages)?;
+            }
+        }
+
+        views.insert(view_uuid, Arc::new(view_archived));
+
+        Ok(())
+    }
+
+    // Given a view UUID and a set of HashMaps containing all the loaded views, descs, and storages
+    // from mmap_from_disk_rec, generate a TableViewMem along with all its dependencies.
+    fn from_mmap_rec(
+        view_uuid: Uuid,
+        views: &HashMap<Uuid, Arc<MmapArchived<TableView>>>,
+        descs: &HashMap<Uuid, Arc<MmapArchived<TableDesc>>>,
+        storages: &HashMap<Uuid, Arc<MmapArchived<TableStorage>>>,
+        view_mems: &mut HashMap<Uuid, TableViewMem>,
+    ) -> TableViewMem {
+        if let Some(view_mem) = view_mems.get(&view_uuid) {
+            // If it's already loaded, we're done.
+            return view_mem.clone();
+        };
+        let view_archived = views
+            .get(&view_uuid)
+            .expect("view not loaded before from_mmap_rec");
+        let desc_archived = descs
+            .get(&view_archived.desc_uuid)
+            .expect("desc not loaded before from_mmap_rec");
+        let storage = match &view_archived.index_mapping {
+            ArchivedIndexMapping::Storage(storage_uuid) => {
+                let storage = storages
+                    .get(storage_uuid)
+                    .expect("storage not loaded before from_mmap_rec");
+                Some(Arc::clone(storage))
+            }
+            _ => None,
+        };
+        let concat_views = match &view_archived.index_mapping {
+            ArchivedIndexMapping::Concat(view_uuids) => {
+                let concat_view_mems = view_uuids
+                    .iter()
+                    .map(|uuid| Self::from_mmap_rec(*uuid, views, descs, storages, view_mems))
+                    .collect::<Vec<TableViewMem>>();
+                let cum_lengths = concat_view_mems
+                    .iter()
+                    .map(|v| v.len())
+                    .scan(0, |state, x| {
+                        *state += x;
+                        Some(*state)
+                    })
+                    .collect::<Vec<usize>>();
+                Some((concat_view_mems, cum_lengths))
+            }
+            _ => None,
+        };
+        let referenced_view = match &view_archived.index_mapping {
+            ArchivedIndexMapping::Indices(view_uuid, _indices) => {
+                let referenced_view_mem =
+                    Self::from_mmap_rec(*view_uuid, views, descs, storages, view_mems);
+                Some(Box::new(referenced_view_mem))
+            }
+            ArchivedIndexMapping::Range { table_uuid, .. } => {
+                let referenced_view_mem =
+                    Self::from_mmap_rec(*table_uuid, views, descs, storages, view_mems);
+                Some(Box::new(referenced_view_mem))
+            }
+            _ => None,
+        };
+        let live_columns = (0..desc_archived.columns.len()).collect::<Vec<usize>>();
+        let view_mem = TableViewMem {
+            view: Arc::clone(view_archived),
+            desc: Arc::clone(desc_archived),
+            storage,
+            concat_views,
+            referenced_view,
+            live_columns,
+        };
+        view_mems.insert(view_uuid, view_mem.clone());
+        view_mem
+    }
+
     /// Run different closures depending on the kind of index mapping
     fn map_index_mapping<'a, SF, CF, IF, RF, O>(
         &'a self,
@@ -1297,7 +1539,19 @@ impl HasUuid for TableDesc {
     }
 }
 
+impl HasUuid for ArchivedTableDesc {
+    fn get_uuid(&self) -> Uuid {
+        self.uuid
+    }
+}
+
 impl HasUuid for TableStorage {
+    fn get_uuid(&self) -> Uuid {
+        self.uuid
+    }
+}
+
+impl HasUuid for ArchivedTableStorage {
     fn get_uuid(&self) -> Uuid {
         self.uuid
     }
@@ -1309,6 +1563,24 @@ impl HasUuid for TableView {
     }
 }
 
+impl HasUuid for ArchivedTableView {
+    fn get_uuid(&self) -> Uuid {
+        self.uuid
+    }
+}
+
+fn get_storage_name_mmapped<T>(obj: &MmapArchived<T>) -> PathBuf
+where
+    T: Archive,
+    T::Archived: HasUuid,
+{
+    get_storage_name_from_type::<T>(obj.get_uuid())
+}
+
+fn get_storage_name_from_type<T>(uuid: Uuid) -> PathBuf {
+    format!("{}-{}.bin", type_name::<T>(), uuid).into()
+}
+
 /// Given an Archive type, write it to disk and return the mmapped struct. Unsafe because it relies
 /// on TMPDIR_PATH being set up.
 unsafe fn make_mmapped<T>(obj: &T) -> MmapArchived<T>
@@ -1317,8 +1589,7 @@ where
     for<'a> T::Archived: CheckBytes<DefaultValidator<'a>>,
 {
     if let Some(tmpdir) = &TMPDIR_PATH {
-        let name: PathBuf = format!("{}-{}.bin", type_name::<T>(), obj.get_uuid()).into();
-        let path = tmpdir.join(name);
+        let path = tmpdir.join(get_storage_name_from_type::<T>(obj.get_uuid()));
         let file = write_serialize(obj, &path)
             .unwrap_or_else(|err| panic!("writing to tmpdir failed, path was {:?}: {}", path, err));
         load_archived::<T>(file, &path).unwrap_or_else(|err| {
@@ -1738,7 +2009,7 @@ mod mmap_archived {
     #[derive(Debug)]
     pub struct MmapArchived<T> {
         mmap: Mmap,
-        fname: PathBuf,
+        pub fname: PathBuf,
         delete_on_drop: bool,
         _phantom: std::marker::PhantomData<T>,
     }
