@@ -462,6 +462,17 @@ impl TableViewMem {
     }
 
     /// Iterate over the rows of a TableView in batches.
+    /// The threads and readahead parameters can speed up loading at the expense of memory usage.
+    /// batch_size: The number of rows in each batch
+    /// drop_last_batch: If true, the last batch will be dropped if it's smaller than batch_size
+    /// threads: The number of threads to use for parallel loading. Must be at least 1, and less
+    ///          than or equal to readahead, unless readahead is 0.
+    /// readahead: The maximum number of batches to load ahead of time. Setting this to at least
+    ///            1 will make data loading asynchronous with your python code that is consuming
+    ///            the iterator - batches will start being loaded as soon as the iterator is
+    ///            created, and will continue being loaded so long as there is space in the
+    ///            readahead buffer.
+    #[pyo3(signature = (batch_size, drop_last_batch=false, threads=1, readahead=0))]
     fn batch_iter(
         &self,
         batch_size: usize,
@@ -469,26 +480,29 @@ impl TableViewMem {
         threads: Option<u32>,
         readahead: Option<u32>,
     ) -> PyResult<BatchIter> {
-        let threads = threads.unwrap_or(1);
-        let readahead = readahead.unwrap_or(1);
         if drop_last_batch && batch_size > self.len() {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "batch_size must be <= the number of rows in the table if drop_last_batch is true",
             ));
         }
-        if threads < 1 {
+
+        let threads = threads.unwrap_or(1);
+        let readahead = readahead.unwrap_or(1);
+        // Do some sanity checks on the threads and readahead values. The only one that is actually
+        // broken broken is where threads = 0, but the other things are probably mistakes.
+        if threads == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "threads must be >= 1",
             ));
         }
-        if readahead < 1 {
+        if readahead == 0 && threads > 1 {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "readahead must be >= 1",
+                "if readahead is 0, threads must be 1",
             ));
         }
-        if threads > readahead {
+        if readahead > 0 && threads > readahead {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "threads must be <= readahead",
+                "if readahead is enabled, threads must be <= readahead",
             ));
         }
         Ok(BatchIter::new(
@@ -1415,8 +1429,6 @@ impl BatchIter {
         // or it's closed.
 
         assert!(threads > 0);
-        assert!(readahead > 0);
-        assert!(threads <= readahead);
 
         let (work_tx, work_rx) = crossbeam_channel::unbounded();
         let (result_tx, result_rx) = crossbeam_channel::bounded(readahead as usize);

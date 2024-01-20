@@ -457,7 +457,7 @@ def test_batch_iter_no_drop_last(tbl_view, request):
 
     assert batch_cnt == len(tbl_view) // 5 + (1 if len(tbl_view) % 5 != 0 else 0)
 
-@pytest.mark.parametrize("threads,readahead", [(1, 2), (1, 10), (2,2), (2, 10), (8, 8)])
+@pytest.mark.parametrize("threads,readahead", [(1, 0), (1, 2), (1, 10), (2,2), (2, 10), (8, 8)])
 def test_batch_iter_threads_no_drop_last(threads, readahead, request):
     tbl_view, tbl_dict = request.getfixturevalue("tbl_view_1")
 
@@ -475,7 +475,7 @@ def test_batch_iter_threads_no_drop_last(threads, readahead, request):
 
     assert batch_cnt == len(tbl_view) // 7 + (1 if len(tbl_view) % 7 != 0 else 0)
 
-@pytest.mark.parametrize("threads,readahead", [(1, 2), (1, 10), (2,2), (2, 10), (8, 8)])
+@pytest.mark.parametrize("threads,readahead", [(1, 0), (1, 2), (1, 10), (2,2), (2, 10), (8, 8)])
 def test_batch_iter_threads_drop_last(threads, readahead, request):
     tbl_view, tbl_dict = request.getfixturevalue("tbl_view_1")
 
