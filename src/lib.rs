@@ -1847,19 +1847,6 @@ fn reshape_pyuntypedarray<'py>(
         .expect("reshape didn't return an array"))
 }
 
-fn concat_pyuntypedarrays<'py>(
-    py: Python<'py>,
-    arrays: Vec<&'py PyUntypedArray>,
-) -> PyResult<&'py PyUntypedArray> {
-    let arrays = PyList::new(py, arrays);
-    let module = py.import(intern!(py, "numpy")).unwrap();
-    let fun = module.getattr(intern!(py, "concatenate")).unwrap();
-    let out = fun.call1((arrays,))?;
-    Ok(out
-        .downcast::<PyUntypedArray>()
-        .expect("concatenate didn't return an array"))
-}
-
 mod py_slice_iter {
     use super::*;
     pub enum PySliceIter {
