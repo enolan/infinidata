@@ -1,3 +1,5 @@
+cargo-features = ["profile-rustflags"]
+
 [package]
 name = "infinidata"
 version = "0.1.0"
@@ -21,3 +23,7 @@ rkyv = { version = "0.7.43", default-features = false, features = [
     "validation",
 ] }
 uuid = { version = "1.6.1", features = ["v4"] }
+
+[profile.release]
+debug = true
+rustflags = ["-C", "force-frame-pointers=y"]
