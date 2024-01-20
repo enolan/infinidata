@@ -457,6 +457,38 @@ def test_batch_iter_no_drop_last(tbl_view, request):
 
     assert batch_cnt == len(tbl_view) // 5 + (1 if len(tbl_view) % 5 != 0 else 0)
 
+@pytest.mark.parametrize("threads,readahead", [(1, 2), (1, 10), (2,2), (2, 10), (8, 8)])
+def test_batch_iter_threads_no_drop_last(threads, readahead, request):
+    tbl_view, tbl_dict = request.getfixturevalue("tbl_view_1")
+
+    batch_cnt = 0
+    for i, batch in enumerate(tbl_view.batch_iter(7, drop_last_batch=False, threads=threads, readahead=readahead)):
+        batch_cnt += 1
+        for k in batch.keys():
+            if i == len(tbl_view) // 7:
+                assert len(batch[k]) == len(tbl_view) % 7
+            else:
+                assert len(batch[k]) == 7
+            np.testing.assert_array_equal(
+                batch[k], tbl_dict[k][i * 7 : (i + 1) * 7], strict=True
+            )
+
+    assert batch_cnt == len(tbl_view) // 7 + (1 if len(tbl_view) % 7 != 0 else 0)
+
+@pytest.mark.parametrize("threads,readahead", [(1, 2), (1, 10), (2,2), (2, 10), (8, 8)])
+def test_batch_iter_threads_drop_last(threads, readahead, request):
+    tbl_view, tbl_dict = request.getfixturevalue("tbl_view_1")
+
+    batch_cnt = 0
+    for i, batch in enumerate(tbl_view.batch_iter(7, drop_last_batch=True, threads=threads, readahead=readahead)):
+        batch_cnt += 1
+        for k in batch.keys():
+            assert len(batch[k]) == 7
+            np.testing.assert_array_equal(
+                batch[k], tbl_dict[k][i * 7 : (i + 1) * 7], strict=True
+            )
+
+    assert batch_cnt == len(tbl_view) // 7
 
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
 def test_select_columns(tbl_view, request):

@@ -1,5 +1,7 @@
 use core::fmt::Debug;
+use crossbeam_channel::Receiver;
 use memmap::Mmap;
+use mvar::Mvar;
 use numpy as np;
 use numpy::array::*;
 use numpy::PyUntypedArray;
@@ -19,13 +21,14 @@ use rkyv::validation::validators::{check_archived_root, DefaultValidator};
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 use std::any::type_name;
 use std::cmp::{min, Ordering};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::thread;
 use uuid::Uuid;
 
 /// Our top level module
@@ -459,18 +462,42 @@ impl TableViewMem {
     }
 
     /// Iterate over the rows of a TableView in batches.
-    fn batch_iter(&self, batch_size: usize, drop_last_batch: bool) -> PyResult<BatchIter> {
+    fn batch_iter(
+        &self,
+        batch_size: usize,
+        drop_last_batch: bool,
+        threads: Option<u32>,
+        readahead: Option<u32>,
+    ) -> PyResult<BatchIter> {
+        let threads = threads.unwrap_or(1);
+        let readahead = readahead.unwrap_or(1);
         if drop_last_batch && batch_size > self.len() {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "batch_size must be <= the number of rows in the table if drop_last_batch is true",
             ));
         }
-        Ok(BatchIter {
-            view: self.clone(),
+        if threads < 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "threads must be >= 1",
+            ));
+        }
+        if readahead < 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "readahead must be >= 1",
+            ));
+        }
+        if threads > readahead {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "threads must be <= readahead",
+            ));
+        }
+        Ok(BatchIter::new(
+            self.clone(),
             batch_size,
             drop_last_batch,
-            batch_idx: 0,
-        })
+            threads,
+            readahead,
+        ))
     }
 
     /// Select the columns to be viewed, returning a new TableView. Subscripting the TableView and
@@ -1364,10 +1391,113 @@ fn column_storage_from_pyarray(py: Python<'_>, array: &PyUntypedArray) -> PyResu
 
 #[pyclass]
 struct BatchIter {
-    view: TableViewMem,
-    batch_size: usize,
-    drop_last_batch: bool,
-    batch_idx: usize,
+    result_queue_recv: Receiver<Arc<Mvar<PreparedBatch>>>,
+    desc: Arc<MmapArchived<TableDesc>>,
+}
+
+/// A batch of data, with a HashMap from column index to the data for that column, and the number
+/// of items in the batch.
+type PreparedBatch = (HashMap<usize, ColumnStorage>, usize);
+
+impl BatchIter {
+    fn new(
+        view: TableViewMem,
+        batch_size: usize,
+        drop_last_batch: bool,
+        threads: u32,
+        readahead: u32,
+    ) -> Self {
+        // This is an iterator that yields batches, fetching them in parallel with readahead.
+        // One thread fills a work queue with batches to fetch, creating MVars to put the results
+        // in. The MVars are put into a result queue. When Python calls __next__ we try to read
+        // from the first MVar in result_queue. If it's empty we block until it's filled. If it's
+        // full we pop it and return the batch. If result_queue is empty we block until it's not,
+        // or it's closed.
+
+        assert!(threads > 0);
+        assert!(readahead > 0);
+        assert!(threads <= readahead);
+
+        let (work_tx, work_rx) = crossbeam_channel::unbounded();
+        let (result_tx, result_rx) = crossbeam_channel::bounded(readahead as usize);
+
+        // Launch work queue filler thread
+        {
+            let view = view.clone();
+            thread::spawn(move || {
+                let mut batch_idx = 0;
+                loop {
+                    let batch_start = batch_idx * batch_size;
+                    let batch_stop = batch_start + batch_size;
+
+                    if batch_stop > view.len() && drop_last_batch {
+                        break;
+                    }
+
+                    if batch_start >= view.len() {
+                        break;
+                    }
+
+                    let batch_stop = min(batch_stop, view.len());
+                    let slice = PySliceIndices {
+                        start: batch_start as isize,
+                        stop: batch_stop as isize,
+                        step: 1,
+                        slicelength: (batch_stop - batch_start) as isize,
+                    };
+
+                    let mvar = Arc::new(Mvar::empty());
+                    work_tx.send((slice, Arc::clone(&mvar))).unwrap();
+                    match result_tx.send(mvar) {
+                        Ok(()) => (),
+                        Err(_) => break, // result_rx has been dropped, which means the iterator has been dropped
+                    }
+
+                    batch_idx += 1;
+                }
+            });
+        }
+
+        // Launch worker threads
+        for _ in 0..threads {
+            let view = view.clone();
+            let work_rx = work_rx.clone();
+            let cols = view.live_columns.clone();
+            thread::spawn(move || {
+                // Iterating over work_rx continues until work_tx is dropped.
+                for (slice, mvar) in work_rx {
+                    let mut batch = HashMap::with_capacity(cols.len());
+                    for col in &cols {
+                        let col_storage = match view.desc.columns[*col].dtype {
+                            ArchivedDType::F32 => {
+                                let col_iter = view.get_f32_column_range(*col, &slice);
+                                ColumnStorage::F32(col_iter.collect())
+                            }
+                            ArchivedDType::I32 => {
+                                let col_iter = view.get_i32_column_range(*col, &slice);
+                                ColumnStorage::I32(col_iter.collect())
+                            }
+                            ArchivedDType::I64 => {
+                                let col_iter = view.get_i64_column_range(*col, &slice);
+                                ColumnStorage::I64(col_iter.collect())
+                            }
+                            ArchivedDType::UString => {
+                                let col_iter = view.get_string_column_range(*col, &slice);
+                                ColumnStorage::UString(col_iter.collect())
+                            }
+                        };
+                        batch.insert(*col, col_storage);
+                    }
+                    mvar.put((batch, slice.slicelength as usize)).unwrap();
+                }
+            });
+        }
+
+        Self {
+            result_queue_recv: result_rx,
+            desc: view.desc,
+        }
+    }
 }
 
 #[pymethods]
@@ -1377,24 +1507,46 @@ impl BatchIter {
     }
 
     fn __next__(&mut self, py: Python<'_>) -> Option<Py<PyDict>> {
-        let batch_start = self.batch_idx * self.batch_size;
-        let batch_stop = batch_start + self.batch_size;
-        let len = self.view.len();
+        match self.result_queue_recv.recv() {
+            Ok(mvar) => {
+                // There is at least one batch currently being processed.
+                let (batch, batch_size): (HashMap<usize, ColumnStorage>, usize) =
+                    mvar.take().unwrap();
+                let dict = PyDict::new(py);
+                for (col, storage) in batch {
+                    let arr: &PyUntypedArray = match storage {
+                        ColumnStorage::F32(data) => {
+                            np::PyArray::from_vec(py, data).downcast().unwrap()
+                        }
+                        ColumnStorage::I32(data) => {
+                            np::PyArray::from_vec(py, data).downcast().unwrap()
+                        }
+                        ColumnStorage::I64(data) => {
+                            np::PyArray::from_vec(py, data).downcast().unwrap()
+                        }
+                        ColumnStorage::UString(data) => {
+                            let strings_list = PyList::new(py, data);
+                            let np = py.import(intern!(py, "numpy")).unwrap();
+                            let fun = np.getattr(intern!(py, "array")).unwrap();
+                            fun.call1((strings_list,)).unwrap().downcast().unwrap()
+                        }
+                    };
+                    let col_desc = &self.desc.columns[col];
+                    let out_dims = std::iter::once(batch_size)
+                        .chain(col_desc.dims.iter().map(|&d| d as usize))
+                        .collect::<Vec<usize>>();
+                    let arr = reshape_pyuntypedarray(py, arr, &out_dims).unwrap();
+                    dict.set_item(col_desc.name.to_string(), arr).unwrap();
+                }
 
-        if batch_stop > len && self.drop_last_batch {
-            return None;
+                Some(dict.into())
+            }
+            Err(_) => {
+                // Result queue has been dropped, which means the work queue filler thread exited
+                // and there are no more batches to fetch.
+                None
+            }
         }
-        if batch_start >= len {
-            return None;
-        }
-        let batch_stop = min(batch_stop, len);
-        let slice = PySlice::new(py, batch_start as isize, batch_stop as isize, 1);
-        let batch = self
-            .view
-            .get_item(slice.downcast().unwrap())
-            .expect("getting batch failed");
-        self.batch_idx += 1;
-        Some(batch)
     }
 }
 
