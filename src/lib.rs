@@ -1704,9 +1704,12 @@ impl BatchIter {
         let (work_tx, work_rx) = crossbeam_channel::unbounded();
         let (result_tx, result_rx) = crossbeam_channel::bounded(readahead as usize);
 
+        let desc = view.desc.clone();
+        let view_arc = Arc::new(view);
+
         // Launch work queue filler thread
         {
-            let view = view.clone();
+            let view = view_arc.clone();
             thread::spawn(move || {
                 let mut batch_idx = 0;
                 loop {
@@ -1743,7 +1746,7 @@ impl BatchIter {
 
         // Launch worker threads
         for _ in 0..threads {
-            let view = view.clone();
+            let view = view_arc.clone();
             let work_rx = work_rx.clone();
             let cols = view.live_columns.clone();
             thread::spawn(move || {
@@ -1778,7 +1781,7 @@ impl BatchIter {
 
         Self {
             result_queue_recv: result_rx,
-            desc: view.desc,
+            desc,
         }
     }
 }
