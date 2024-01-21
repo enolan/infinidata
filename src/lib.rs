@@ -26,6 +26,7 @@ use std::env;
 use std::fs;
 use std::fs::File;
 use std::io::BufWriter;
+use std::ops::Deref;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -36,7 +37,7 @@ use uuid::Uuid;
 #[pymodule]
 fn infinidata(_py: Python, m: &PyModule) -> PyResult<()> {
     unsafe { setup_tmpdir_path() }; // It's safe to invoke this because we have the GIL here.
-    m.add_class::<TableViewMem>()?;
+    m.add_class::<TableViewPy>()?;
     Ok(())
 }
 
@@ -140,6 +141,18 @@ enum IndexMapping {
 /// tv[np.array([1, 3, 5])] gets rows 1, 3, and 5. You can also use a slice with a step size:
 /// tv[1:10:2] gets rows 1, 3, 5, 7, and 9.
 #[pyclass(name = "TableView")]
+struct TableViewPy {
+    view: Arc<TableViewMem>,
+}
+
+impl Deref for TableViewPy {
+    type Target = TableViewMem;
+
+    fn deref(&self) -> &Self::Target {
+        &self.view
+    }
+}
+
 #[derive(Clone, Debug)]
 struct TableViewMem {
     // We separate the TableView Rust struct from the TableViewMem Rust struct, and only expose the
@@ -149,16 +162,47 @@ struct TableViewMem {
     view: Arc<MmapArchived<TableView>>,
     desc: Arc<MmapArchived<TableDesc>>,
     storage: Option<Arc<MmapArchived<TableStorage>>>, // If the IndexMapping is Storage
-    concat_views: Option<(Vec<TableViewMem>, Vec<usize>)>, // If it's Concat
-    referenced_view: Option<Box<TableViewMem>>,       // If it's Indices or Range
+    concat_views: Option<(Vec<Arc<TableViewMem>>, Vec<usize>)>, // If it's Concat
+    referenced_view: Option<Arc<TableViewMem>>,       // If it's Indices or Range
     /// Columns that we're looking at - it's possible to ignore columns. For now this is a purely
     /// runtime effect and ignoring a column doesn't cause the column to be removed from the
     /// storage. Mostly you want to ignore columns to save disk I/O, not disk space.
     live_columns: Vec<usize>,
 }
 
-#[pymethods]
 impl TableViewMem {
+    fn len(&self) -> usize {
+        match &self.view.index_mapping {
+            ArchivedIndexMapping::Storage(_storage_uuid) => {
+                let storage = self.storage.as_ref().unwrap();
+                let col_storage = &storage.columns[0];
+                let dims_product: usize =
+                    self.desc.columns[0].dims.iter().product::<u64>() as usize;
+                let elem_len = match col_storage {
+                    ArchivedColumnStorage::F32(data) => data.len(),
+                    ArchivedColumnStorage::I32(data) => data.len(),
+                    ArchivedColumnStorage::I64(data) => data.len(),
+                    ArchivedColumnStorage::UString(data) => data.len(),
+                };
+                elem_len / dims_product
+            }
+            ArchivedIndexMapping::Concat(_views) => {
+                let (_concat_views, cum_lengths) = self.concat_views.as_ref().unwrap();
+                *cum_lengths.last().unwrap()
+            }
+            ArchivedIndexMapping::Indices(_view_uuid, indices) => indices.len(),
+            ArchivedIndexMapping::Range {
+                table_uuid: _,
+                start,
+                stop,
+                step,
+            } => ((stop - *start as i64) / step) as usize,
+        }
+    }
+}
+
+#[pymethods]
+impl TableViewPy {
     #[new]
     fn new(dict: &PyDict) -> Self {
         let py = dict.py();
@@ -170,13 +214,15 @@ impl TableViewMem {
         };
         let view_archived = unsafe { make_mmapped(&view) };
         let ncols = desc.columns.len();
-        TableViewMem {
-            view: Arc::new(view_archived),
-            desc: Arc::new(desc),
-            storage: Some(Arc::new(storage)),
-            concat_views: None,
-            referenced_view: None,
-            live_columns: (0..ncols).collect(),
+        TableViewPy {
+            view: Arc::new(TableViewMem {
+                view: Arc::new(view_archived),
+                desc: Arc::new(desc),
+                storage: Some(Arc::new(storage)),
+                concat_views: None,
+                referenced_view: None,
+                live_columns: (0..ncols).collect(),
+            }),
         }
     }
 
@@ -279,43 +325,12 @@ impl TableViewMem {
 
     #[pyo3(name = "__len__")]
     fn len(&self) -> usize {
-        match &self.view.index_mapping {
-            ArchivedIndexMapping::Storage(_storage_uuid) => {
-                let storage = self
-                    .storage
-                    .as_ref()
-                    .expect("storage not set when IndexMapping is Storage");
-                let col_storage = &storage.columns[0];
-                let dims_product: usize =
-                    self.desc.columns[0].dims.iter().product::<u64>() as usize;
-                let elem_len = match col_storage {
-                    ArchivedColumnStorage::F32(data) => data.len(),
-                    ArchivedColumnStorage::I32(data) => data.len(),
-                    ArchivedColumnStorage::I64(data) => data.len(),
-                    ArchivedColumnStorage::UString(data) => data.len(),
-                };
-                elem_len / dims_product
-            }
-            ArchivedIndexMapping::Concat(_views) => {
-                let (_concat_views, cum_lengths) = self
-                    .concat_views
-                    .as_ref()
-                    .expect("concat_views not set when IndexMapping is Concat");
-                *cum_lengths.last().unwrap()
-            }
-            ArchivedIndexMapping::Indices(_view_uuid, indices) => indices.len(),
-            ArchivedIndexMapping::Range {
-                table_uuid: _,
-                start,
-                stop,
-                step,
-            } => ((stop - *start as i64) / step) as usize,
-        }
+        (**self).len()
     }
 
     /// Get the UUID of the TableView
     fn uuid(&self) -> String {
-        self.view.uuid.to_string()
+        (**self).view.uuid.to_string()
     }
 
     /// Concatenate multiple TableViews together
@@ -326,18 +341,19 @@ impl TableViewMem {
                 "Must pass at least one view to concat",
             ));
         }
-        let mut concat_views: Vec<TableViewMem> = Vec::with_capacity(views.len());
+        let mut concat_views: Vec<Arc<TableViewMem>> = Vec::with_capacity(views.len());
         let mut view_lens: Vec<usize> = Vec::with_capacity(views.len());
         let all_desc: &ArchivedTableDesc = &views[0].extract::<PyRef<Self>>()?.desc;
-        for (i, view) in views.iter().enumerate() {
-            let view = view.extract::<PyRef<Self>>()?;
+        for (i, view_py) in views.iter().enumerate() {
+            let view_py = view_py.extract::<PyRef<Self>>()?;
+            let view: &Self = view_py.deref();
             view_lens.push(view.len());
             if i != 0 && view.desc.columns != all_desc.columns {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "All views must have the same column definitions",
                 ));
             }
-            concat_views.push(view.clone());
+            concat_views.push(Arc::clone(&view.view))
         }
         let table_view = TableView {
             uuid: Uuid::new_v4(),
@@ -354,13 +370,16 @@ impl TableViewMem {
         }
 
         let table_view_archived = unsafe { make_mmapped(&table_view) };
-        Ok(TableViewMem {
+        let tvm = TableViewMem {
             view: Arc::new(table_view_archived),
             desc: Arc::clone(&views[0].extract::<PyRef<Self>>()?.desc),
             storage: None,
             concat_views: Some((concat_views, cum_lengths)),
             referenced_view: None,
             live_columns: (0..all_desc.columns.len()).collect(),
+        };
+        Ok(TableViewPy {
+            view: Arc::new(tvm),
         })
     }
 
@@ -391,16 +410,19 @@ impl TableViewMem {
             let table_view = TableView {
                 uuid: Uuid::new_v4(),
                 desc_uuid: self.desc.uuid,
-                index_mapping: IndexMapping::Indices(self.view.uuid, idx_vec),
+                index_mapping: IndexMapping::Indices((**self).view.uuid, idx_vec),
             };
             let table_view_archived = unsafe { make_mmapped(&table_view) };
-            Ok(TableViewMem {
+            let tvm = TableViewMem {
                 view: Arc::new(table_view_archived),
                 desc: Arc::clone(&self.desc),
                 storage: None,
                 concat_views: None,
-                referenced_view: Some(Box::new(self.clone())),
+                referenced_view: Some(Arc::clone(&self.view)),
                 live_columns: self.live_columns.clone(),
+            };
+            Ok(TableViewPy {
+                view: Arc::new(tvm),
             })
         } else if let Ok(slice) = mapping.downcast::<PySlice>() {
             let slice_idxs = slice.indices(self.len() as i64)?;
@@ -408,20 +430,23 @@ impl TableViewMem {
                 uuid: Uuid::new_v4(),
                 desc_uuid: self.desc.uuid,
                 index_mapping: IndexMapping::Range {
-                    table_uuid: self.view.uuid,
+                    table_uuid: (**self).view.uuid,
                     start: slice_idxs.start as usize,
                     stop: slice_idxs.stop,
                     step: slice_idxs.step,
                 },
             };
             let table_view_archived = unsafe { make_mmapped(&table_view) };
-            Ok(TableViewMem {
+            let tvm = TableViewMem {
                 view: Arc::new(table_view_archived),
                 desc: Arc::clone(&self.desc),
                 storage: None,
                 concat_views: None,
-                referenced_view: Some(Box::new(self.clone())),
+                referenced_view: Some(Arc::clone(&self.view)),
                 live_columns: self.live_columns.clone(),
+            };
+            Ok(TableViewPy {
+                view: Arc::new(tvm),
             })
         } else {
             Err(pyo3::exceptions::PyTypeError::new_err(
@@ -449,16 +474,19 @@ impl TableViewMem {
         let table_view = TableView {
             uuid: Uuid::new_v4(),
             desc_uuid: self.desc.uuid,
-            index_mapping: IndexMapping::Indices(self.view.uuid, indices.to_vec()),
+            index_mapping: IndexMapping::Indices((**self).view.uuid, indices.to_vec()),
         };
         let table_view_archived = unsafe { make_mmapped(&table_view) };
-        Ok(TableViewMem {
+        let tvm = TableViewMem {
             view: Arc::new(table_view_archived),
             desc: Arc::clone(&self.desc),
             storage: None,
             concat_views: None,
-            referenced_view: Some(Box::new(self.clone())),
+            referenced_view: Some(Arc::clone(&self.view)),
             live_columns: self.live_columns.clone(),
+        };
+        Ok(TableViewPy {
+            view: Arc::new(tvm),
         })
     }
 
@@ -507,7 +535,7 @@ impl TableViewMem {
             ));
         }
         Ok(BatchIter::new(
-            self.clone(),
+            self,
             batch_size,
             drop_last_batch,
             threads,
@@ -531,13 +559,16 @@ impl TableViewMem {
                 })?;
             live_columns.push(col_idx);
         }
-        Ok(TableViewMem {
-            view: Arc::clone(&self.view),
+        let tvm = TableViewMem {
+            view: Arc::clone(&self.view.view),
             desc: Arc::clone(&self.desc),
             storage: self.storage.clone(),
             concat_views: self.concat_views.clone(),
             referenced_view: self.referenced_view.clone(),
             live_columns,
+        };
+        Ok(TableViewPy {
+            view: Arc::new(tvm),
         })
     }
 
@@ -588,16 +619,19 @@ impl TableViewMem {
         let table_view = TableView {
             uuid: Uuid::new_v4(),
             desc_uuid: self.desc.uuid,
-            index_mapping: IndexMapping::Indices(self.view.uuid, retained_indices),
+            index_mapping: IndexMapping::Indices(self.view.view.uuid, retained_indices),
         };
         let table_view_archived = unsafe { make_mmapped(&table_view) };
-        Ok(TableViewMem {
+        let tvm = TableViewMem {
             view: Arc::new(table_view_archived),
             desc: Arc::clone(&self.desc),
             storage: None,
             concat_views: None,
-            referenced_view: Some(Box::new(self.clone())),
+            referenced_view: Some(Arc::clone(&self.view)),
             live_columns: self.live_columns.clone(),
+        };
+        Ok(TableViewPy {
+            view: Arc::new(tvm),
         })
     }
 
@@ -623,10 +657,11 @@ impl TableViewMem {
             },
         }
 
+        let view: &TableViewMem = &self.view;
         let mut names_to_link: Vec<(&Path, PathBuf)> = Vec::with_capacity(3);
         names_to_link.extend_from_slice(&[
-            (&self.view.fname, get_storage_name_mmapped(&self.view)),
-            (&self.desc.fname, get_storage_name_mmapped(&self.desc)),
+            (&view.view.fname, get_storage_name_mmapped(&view.view)),
+            (&view.desc.fname, get_storage_name_mmapped(&view.desc)),
         ]);
         if let Some(storage) = &self.storage {
             names_to_link.push((&storage.fname, get_storage_name_mmapped(storage)));
@@ -660,21 +695,21 @@ impl TableViewMem {
             }
         }
 
-        let mut inner_views: Vec<&TableViewMem> = Vec::new();
+        let mut inner_views: Vec<Arc<TableViewMem>> = Vec::new();
         if let Some((concat_views, _cum_lengths)) = &self.concat_views {
-            inner_views.extend(concat_views);
+            inner_views.extend(concat_views.iter().cloned());
         }
         if let Some(referenced_view) = &self.referenced_view {
-            inner_views.push(referenced_view);
+            inner_views.push(referenced_view.clone());
         }
 
         for inner_view in inner_views {
-            inner_view.save_to_disk(dir.clone(), None)?;
+            (TableViewPy { view: inner_view }).save_to_disk(dir.clone(), None)?;
         }
 
         if let Some(filename) = filename {
             let filename = dir.join(filename);
-            fs::write(filename, self.view.uuid.to_string())?;
+            fs::write(filename, view.view.uuid.to_string())?;
         }
 
         Ok(())
@@ -697,11 +732,12 @@ impl TableViewMem {
         let mut descs: HashMap<Uuid, Arc<MmapArchived<TableDesc>>> = HashMap::new();
         let mut storages: HashMap<Uuid, Arc<MmapArchived<TableStorage>>> = HashMap::new();
 
-        Self::mmap_from_disk_rec(&dir, view_uuid, &mut views, &mut descs, &mut storages)?;
+        TableViewMem::mmap_from_disk_rec(&dir, view_uuid, &mut views, &mut descs, &mut storages)?;
 
-        let mut view_mems: HashMap<Uuid, TableViewMem> = HashMap::new();
-        let view_mem = Self::from_mmap_rec(view_uuid, &views, &descs, &storages, &mut view_mems);
-        Ok(view_mem)
+        let mut view_mems: HashMap<Uuid, Arc<TableViewMem>> = HashMap::new();
+        let view_mem =
+            TableViewMem::from_mmap_rec(view_uuid, &views, &descs, &storages, &mut view_mems);
+        Ok(TableViewPy { view: view_mem })
     }
 }
 
@@ -779,8 +815,8 @@ impl TableViewMem {
         views: &HashMap<Uuid, Arc<MmapArchived<TableView>>>,
         descs: &HashMap<Uuid, Arc<MmapArchived<TableDesc>>>,
         storages: &HashMap<Uuid, Arc<MmapArchived<TableStorage>>>,
-        view_mems: &mut HashMap<Uuid, TableViewMem>,
-    ) -> TableViewMem {
+        view_mems: &mut HashMap<Uuid, Arc<TableViewMem>>,
+    ) -> Arc<TableViewMem> {
         if let Some(view_mem) = view_mems.get(&view_uuid) {
             // If it's already loaded, we're done.
             return view_mem.clone();
@@ -805,7 +841,7 @@ impl TableViewMem {
                 let concat_view_mems = view_uuids
                     .iter()
                     .map(|uuid| Self::from_mmap_rec(*uuid, views, descs, storages, view_mems))
-                    .collect::<Vec<TableViewMem>>();
+                    .collect::<Vec<Arc<TableViewMem>>>();
                 let cum_lengths = concat_view_mems
                     .iter()
                     .map(|v| v.len())
@@ -822,24 +858,24 @@ impl TableViewMem {
             ArchivedIndexMapping::Indices(view_uuid, _indices) => {
                 let referenced_view_mem =
                     Self::from_mmap_rec(*view_uuid, views, descs, storages, view_mems);
-                Some(Box::new(referenced_view_mem))
+                Some(Arc::clone(&referenced_view_mem))
             }
             ArchivedIndexMapping::Range { table_uuid, .. } => {
                 let referenced_view_mem =
                     Self::from_mmap_rec(*table_uuid, views, descs, storages, view_mems);
-                Some(Box::new(referenced_view_mem))
+                Some(Arc::clone(&referenced_view_mem))
             }
             _ => None,
         };
         let live_columns = (0..desc_archived.columns.len()).collect::<Vec<usize>>();
-        let view_mem = TableViewMem {
+        let view_mem = Arc::new(TableViewMem {
             view: Arc::clone(view_archived),
             desc: Arc::clone(desc_archived),
             storage,
             concat_views,
             referenced_view,
             live_columns,
-        };
+        });
         view_mems.insert(view_uuid, view_mem.clone());
         view_mem
     }
@@ -855,7 +891,7 @@ impl TableViewMem {
     ) -> O
     where
         SF: FnOnce(&'a ArchivedColumnStorage) -> O,
-        CF: FnOnce(&'a [TableViewMem]) -> O,
+        CF: FnOnce(&[&'a TableViewMem]) -> O,
         IF: FnOnce(&'a TableViewMem, &[u64]) -> O,
         RF: FnOnce(&'a TableViewMem, usize, isize, isize) -> O,
     {
@@ -873,7 +909,11 @@ impl TableViewMem {
                     .concat_views
                     .as_ref()
                     .expect("concat_views not set when IndexMapping is Concat");
-                concat_fun(concat_views)
+                let concat_views = concat_views
+                    .iter()
+                    .map(|v| v as &TableViewMem)
+                    .collect::<Vec<&TableViewMem>>();
+                concat_fun(&concat_views)
             }
             ArchivedIndexMapping::Indices(_view_uuid, indices) => {
                 let referenced_view = self
@@ -921,7 +961,7 @@ impl TableViewMem {
                     _ => panic!("get_f32_column_at_idx called on non-f32 column"),
                 }
             },
-            |_concat_views: &[TableViewMem]| {
+            |_concat_views: &[&TableViewMem]| {
                 let (subview, inner_idx) = self.get_subview_and_idx(idx).unwrap();
                 subview.get_f32_column_at_idx(col, inner_idx)
             },
@@ -947,7 +987,7 @@ impl TableViewMem {
                     _ => panic!("get_i32_column_at_idx called on non-i32 column"),
                 }
             },
-            |_concat_views: &[TableViewMem]| {
+            |_concat_views: &[&TableViewMem]| {
                 let (subview, inner_idx) = self.get_subview_and_idx(idx).unwrap();
                 subview.get_i32_column_at_idx(col, inner_idx)
             },
@@ -973,7 +1013,7 @@ impl TableViewMem {
                     _ => panic!("get_i64_column_at_idx called on non-i64 column"),
                 }
             },
-            |_concat_views: &[TableViewMem]| {
+            |_concat_views: &[&TableViewMem]| {
                 let (subview, inner_idx) = self.get_subview_and_idx(idx).unwrap();
                 subview.get_i64_column_at_idx(col, inner_idx)
             },
@@ -1005,7 +1045,7 @@ impl TableViewMem {
                     _ => panic!("get_string_column_at_idx called on non-string column"),
                 }
             },
-            |_concat_views: &[TableViewMem]| {
+            |_concat_views: &[&TableViewMem]| {
                 let (subview, inner_idx) = self.get_subview_and_idx(idx).unwrap();
                 subview.get_string_column_at_idx(col, inner_idx)
             },
@@ -1059,7 +1099,7 @@ impl TableViewMem {
         inner_ranges
             .into_iter()
             .zip(subviews_to_use)
-            .map(|((start, end), subview)| (subview, start, end))
+            .map(|((start, end), subview)| (subview.as_ref(), start, end))
             .collect()
     }
 
@@ -1098,7 +1138,7 @@ impl TableViewMem {
                         _ => panic!("get_f32_column_range called on non-f32 column"),
                     }
                 },
-                |_concat_views: &[TableViewMem]| {
+                |_concat_views: &[&TableViewMem]| {
                     let inner_ranges = self
                         .get_contiguous_range_subviews(slice.start as usize, slice.stop as usize);
                     Box::new(
@@ -1179,7 +1219,7 @@ impl TableViewMem {
                         _ => panic!("get_i32_column_range called on non-i32 column"),
                     }
                 },
-                |_concat_views: &[TableViewMem]| {
+                |_concat_views: &[&TableViewMem]| {
                     let inner_ranges = self
                         .get_contiguous_range_subviews(slice.start as usize, slice.stop as usize);
                     Box::new(
@@ -1260,7 +1300,7 @@ impl TableViewMem {
                         _ => panic!("get_i64_column_range called on non-i64 column"),
                     }
                 },
-                |_concat_views: &[TableViewMem]| {
+                |_concat_views: &[&TableViewMem]| {
                     let inner_ranges = self
                         .get_contiguous_range_subviews(slice.start as usize, slice.stop as usize);
                     Box::new(
@@ -1343,7 +1383,7 @@ impl TableViewMem {
                         _ => panic!("get_string_column_range called on non-string column"),
                     }
                 },
-                |_concat_views: &[TableViewMem]| {
+                |_concat_views: &[&TableViewMem]| {
                     let inner_ranges = self
                         .get_contiguous_range_subviews(slice.start as usize, slice.stop as usize);
                     Box::new(
@@ -1686,7 +1726,7 @@ type PreparedBatch = (HashMap<usize, ColumnStorage>, usize);
 
 impl BatchIter {
     fn new(
-        view: TableViewMem,
+        view: &TableViewPy,
         batch_size: usize,
         drop_last_batch: bool,
         threads: u32,
@@ -1705,11 +1745,10 @@ impl BatchIter {
         let (result_tx, result_rx) = crossbeam_channel::bounded(readahead as usize);
 
         let desc = view.desc.clone();
-        let view_arc = Arc::new(view);
 
         // Launch work queue filler thread
         {
-            let view = view_arc.clone();
+            let view: Arc<TableViewMem> = view.view.clone();
             thread::spawn(move || {
                 let mut batch_idx = 0;
                 loop {
@@ -1746,7 +1785,7 @@ impl BatchIter {
 
         // Launch worker threads
         for _ in 0..threads {
-            let view = view_arc.clone();
+            let view: Arc<TableViewMem> = view.view.clone();
             let work_rx = work_rx.clone();
             let cols = view.live_columns.clone();
             thread::spawn(move || {
