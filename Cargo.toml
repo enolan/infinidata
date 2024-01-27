@@ -28,4 +28,5 @@ uuid = { version = "1.6.1", features = ["v4"] }
 
 [profile.release]
 debug = true
-rustflags = ["-C", "force-frame-pointers=y"]
+rustflags = ["-C", "force-frame-pointers=y", "-C", "target-cpu=native"]
+codegen-units = 1
