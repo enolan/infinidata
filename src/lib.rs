@@ -315,7 +315,57 @@ impl TableViewPy {
             }
             Ok(out.into())
         } else if let Ok(idx_array) = index.downcast::<PyArray1<i64>>() {
-            todo!("get_item array {idx_array}")
+            let idx_array = make_contiguous(py, idx_array)
+                .downcast::<PyArray1<i64>>()
+                .unwrap()
+                .readonly();
+            let idx_slice = idx_array.as_slice().unwrap();
+            for idx in idx_slice {
+                if *idx as usize >= self.len() || *idx < 0 {
+                    return Err(pyo3::exceptions::PyIndexError::new_err(
+                        "Index out of bounds",
+                    ));
+                }
+            }
+            for (col, col_desc) in column_descs {
+                let col_name = col_desc.name.to_string();
+                let arr: &PyUntypedArray = match col_desc.dtype {
+                    ArchivedDType::F32 => {
+                        let iter = idx_slice
+                            .iter()
+                            .flat_map(|&i| self.get_f32_column_at_idx(col, i as usize));
+                        np::PyArray::from_iter(py, iter).downcast().unwrap()
+                    }
+                    ArchivedDType::I32 => {
+                        let iter = idx_slice
+                            .iter()
+                            .flat_map(|&i| self.get_i32_column_at_idx(col, i as usize));
+                        np::PyArray::from_iter(py, iter).downcast().unwrap()
+                    }
+                    ArchivedDType::I64 => {
+                        let iter = idx_slice
+                            .iter()
+                            .flat_map(|&i| self.get_i64_column_at_idx(col, i as usize));
+                        np::PyArray::from_iter(py, iter).downcast().unwrap()
+                    }
+                    ArchivedDType::UString => {
+                        let iter = idx_slice
+                            .iter()
+                            .flat_map(|&i| self.get_string_column_at_idx(col, i as usize));
+                        let strings = iter.collect::<Vec<String>>();
+                        let string_list = PyList::new(py, strings);
+                        let np = py.import(intern!(py, "numpy")).unwrap();
+                        let fun = np.getattr(intern!(py, "array")).unwrap();
+                        fun.call1((string_list,)).unwrap().downcast().unwrap()
+                    }
+                };
+                let out_dims = std::iter::once(idx_array.len())
+                    .chain(col_desc.dims.iter().map(|&d| d as usize))
+                    .collect::<Vec<usize>>();
+                let arr = reshape_pyuntypedarray(py, arr, &out_dims).unwrap();
+                out.set_item(col_name, arr).unwrap();
+            }
+            Ok(out.into())
         } else {
             Err(pyo3::exceptions::PyTypeError::new_err(
                 "Index must be an integer, slice, or NumPy array of integers",

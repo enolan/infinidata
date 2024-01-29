@@ -121,14 +121,14 @@ def test_slicing_with_negative_start_stop_and_step(tbl_view, request):
             )
 
 
-@pytest.mark.xfail
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
 def test_array_indexing(tbl_view, request):
     tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
     for idx_array in [
         np.array([0, 5, 11]),
         np.array([5, 11, 20]),
-        np.array([11, 20, 30]),
+        np.array([25, 20, 20, 29]),
+        np.arange(10)[::-1],
     ]:
         view_dict = tbl_view[idx_array]
         for key in tbl_dict.keys():
@@ -275,7 +275,6 @@ def test_concat_slice_across(concatable_tbl_views, request):
         start_idx += len(tbl_views[view_idx])
 
 
-@pytest.mark.xfail
 @pytest.mark.parametrize("concatable_tbl_views", concatable_combos)
 def test_concat_array_indexing(concatable_tbl_views, request):
     tbl_views = [request.getfixturevalue(tbl_view) for tbl_view in concatable_tbl_views]
