@@ -584,8 +584,67 @@ impl TableViewPy {
                 "if readahead is enabled, threads must be <= readahead",
             ));
         }
+
         Ok(BatchIter::new(
-            self,
+            vec![Arc::clone(&self.view)],
+            batch_size,
+            drop_last_batch,
+            threads,
+            readahead,
+        ))
+    }
+
+    /// Iterate over the rows of list of TableViews in order, without creating a new view.
+    #[staticmethod]
+    #[pyo3(signature = (views, batch_size, drop_last_batch=false, threads=1, readahead=0))]
+    fn batch_iter_concat(
+        views: &PyList,
+        batch_size: usize,
+        drop_last_batch: bool,
+        threads: Option<u32>,
+        readahead: Option<u32>,
+    ) -> PyResult<BatchIter> {
+        if views.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Must pass at least one view to batch_iter_concat",
+            ));
+        }
+
+        let desc_0 = &views[0].extract::<PyRef<Self>>()?.desc;
+        for desc in views.iter().skip(1) {
+            let desc = &desc.extract::<PyRef<Self>>()?.desc;
+            if desc.columns != desc_0.columns {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "All views must have the same column definitions",
+                ));
+            }
+        }
+
+        let threads = threads.unwrap_or(1);
+        let readahead = readahead.unwrap_or(0);
+
+        if threads == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "threads must be >= 1",
+            ));
+        }
+        if readahead == 0 && threads > 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "if readahead is 0, threads must be 1",
+            ));
+        }
+        if readahead > 0 && threads > readahead {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "if readahead is enabled, threads must be <= readahead",
+            ));
+        }
+
+        let mut views_vec: Vec<Arc<TableViewMem>> = Vec::with_capacity(views.len());
+        for view in views {
+            views_vec.push(Arc::clone(&view.extract::<PyRef<Self>>()?.view));
+        }
+        Ok(BatchIter::new(
+            views_vec,
             batch_size,
             drop_last_batch,
             threads,
@@ -1776,7 +1835,7 @@ type PreparedBatch = (HashMap<usize, ColumnStorage>, usize);
 
 impl BatchIter {
     fn new(
-        view: &TableViewPy,
+        views: Vec<Arc<TableViewMem>>,
         batch_size: usize,
         drop_last_batch: bool,
         threads: u32,
@@ -1787,83 +1846,128 @@ impl BatchIter {
         // in. The MVars are put into a result queue. When Python calls __next__ we try to read
         // from the first MVar in result_queue. If it's empty we block until it's filled. If it's
         // full we pop it and return the batch. If result_queue is empty we block until it's not,
-        // or it's closed.
+        // or it's closed. We support reading the batches from a series of views. This is possible
+        // by iterating over a concat view, but that would require writing it to disk. Avoiding
+        // this is important for txt2img-unsupervised captree performance.
 
         assert!(threads > 0);
+        assert!(!views.is_empty());
 
         let (work_tx, work_rx) = crossbeam_channel::unbounded();
         let (result_tx, result_rx) = crossbeam_channel::bounded(readahead as usize);
 
-        let desc = view.desc.clone();
+        let desc = views[0].desc.clone();
+        let total_len = views.iter().map(|v| v.len()).sum::<usize>();
+        let views = Arc::new(views);
 
         // Launch work queue filler thread
         {
-            let view: Arc<TableViewMem> = view.view.clone();
+            let views: Arc<Vec<Arc<TableViewMem>>> = views.clone();
             thread::spawn(move || {
-                let mut batch_idx = 0;
-                loop {
-                    let batch_start = batch_idx * batch_size;
-                    let batch_stop = batch_start + batch_size;
-
-                    if batch_stop > view.len() && drop_last_batch {
+                let mut this_view = 0;
+                let mut ctr_global = 0;
+                let mut ctr_this_view = 0;
+                while ctr_global < total_len {
+                    // Enqueue batches until we've enqueued a total of total_len rows or until we
+                    // get to batch that would have to be short if drop_last_batch is true.
+                    let rows_left = total_len - ctr_global;
+                    if rows_left < batch_size && drop_last_batch {
                         break;
                     }
 
-                    if batch_start >= view.len() {
+                    if ctr_global >= total_len {
                         break;
                     }
 
-                    let batch_stop = min(batch_stop, view.len());
-                    let slice = PySliceIndices {
-                        start: batch_start as isize,
-                        stop: batch_stop as isize,
-                        step: 1,
-                        slicelength: (batch_stop - batch_start) as isize,
-                    };
-
+                    let mut slices: Vec<(usize, PySliceIndices)> = Vec::new();
+                    let mut rows = 0;
+                    loop {
+                        // Add slices from views until there's enough to fill a batch or we're out
+                        if rows >= batch_size || this_view >= views.len() {
+                            break;
+                        }
+                        let view = &views[this_view];
+                        let start = ctr_this_view;
+                        let stop = min(view.len(), start + batch_size - rows);
+                        let slice = PySliceIndices {
+                            start: start as isize,
+                            stop: stop as isize,
+                            step: 1,
+                            slicelength: (stop - start) as isize,
+                        };
+                        slices.push((this_view, slice));
+                        rows += stop - start;
+                        ctr_global += stop - start;
+                        ctr_this_view += stop - start;
+                        if ctr_this_view >= view.len() {
+                            this_view += 1;
+                            ctr_this_view = 0;
+                        }
+                    }
                     let mvar = Arc::new(Mvar::empty());
                     match result_tx.send(Arc::clone(&mvar)) {
                         Ok(()) => (),
                         Err(_) => break, // result_rx has been dropped, which means the iterator has been dropped
                     }
-                    work_tx.send((slice, mvar)).unwrap();
-
-                    batch_idx += 1;
+                    work_tx.send((slices, mvar)).unwrap();
                 }
             });
         }
 
         // Launch worker threads
         for _ in 0..threads {
-            let view: Arc<TableViewMem> = view.view.clone();
+            let views: Arc<Vec<Arc<TableViewMem>>> = views.clone();
             let work_rx = work_rx.clone();
-            let cols = view.live_columns.clone();
+            let cols = views[0].live_columns.clone();
             thread::spawn(move || {
                 // Iterating over work_rx continues until work_tx is dropped.
-                for (slice, mvar) in work_rx {
+                for (slices, mvar) in work_rx {
+                    let total_len = slices
+                        .iter()
+                        .map(|(_, slice)| slice.slicelength as usize)
+                        .sum();
                     let mut batch = HashMap::with_capacity(cols.len());
                     for col in &cols {
-                        let col_storage = match view.desc.columns[*col].dtype {
+                        match views[0].desc.columns[*col].dtype {
                             ArchivedDType::F32 => {
-                                let col_iter = view.get_f32_column_range(*col, &slice);
-                                ColumnStorage::F32(col_iter.collect())
+                                let mut data = Vec::with_capacity(total_len);
+                                for (view_idx, slice) in &slices {
+                                    let view = &views[*view_idx];
+                                    let col_iter = view.get_f32_column_range(*col, slice);
+                                    data.extend(col_iter);
+                                }
+                                batch.insert(*col, ColumnStorage::F32(data));
                             }
                             ArchivedDType::I32 => {
-                                let col_iter = view.get_i32_column_range(*col, &slice);
-                                ColumnStorage::I32(col_iter.collect())
+                                let mut data = Vec::with_capacity(total_len);
+                                for (view_idx, slice) in &slices {
+                                    let view = &views[*view_idx];
+                                    let col_iter = view.get_i32_column_range(*col, slice);
+                                    data.extend(col_iter);
+                                }
+                                batch.insert(*col, ColumnStorage::I32(data));
                             }
                             ArchivedDType::I64 => {
-                                let col_iter = view.get_i64_column_range(*col, &slice);
-                                ColumnStorage::I64(col_iter.collect())
+                                let mut data = Vec::with_capacity(total_len);
+                                for (view_idx, slice) in &slices {
+                                    let view = &views[*view_idx];
+                                    let col_iter = view.get_i64_column_range(*col, slice);
+                                    data.extend(col_iter);
+                                }
+                                batch.insert(*col, ColumnStorage::I64(data));
                             }
                             ArchivedDType::UString => {
-                                let col_iter = view.get_string_column_range(*col, &slice);
-                                ColumnStorage::UString(col_iter.collect())
+                                let mut data = Vec::with_capacity(total_len);
+                                for (view_idx, slice) in &slices {
+                                    let view = &views[*view_idx];
+                                    let col_iter = view.get_string_column_range(*col, slice);
+                                    data.extend(col_iter);
+                                }
+                                batch.insert(*col, ColumnStorage::UString(data));
                             }
-                        };
-                        batch.insert(*col, col_storage);
+                        }
                     }
-                    mvar.put((batch, slice.slicelength as usize)).unwrap();
+                    mvar.put((batch, total_len)).unwrap();
                 }
             });
         }

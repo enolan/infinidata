@@ -504,6 +504,38 @@ def test_batch_iter_threads_drop_last(threads, readahead, request):
     assert batch_cnt == len(tbl_view) // 7
 
 
+@pytest.mark.parametrize("concatable_tbl_views", concatable_combos)
+def test_concat_batch_iter_concat_no_drop_last(concatable_tbl_views, request):
+    tbl_views = [request.getfixturevalue(tbl_view) for tbl_view in concatable_tbl_views]
+    tbl_views = [tbl_view[0] for tbl_view in tbl_views]
+    total_rows = sum([len(tbl_view) for tbl_view in tbl_views])
+
+    batches = list(
+        infinidata.TableView.batch_iter_concat(
+            tbl_views, batch_size=5, drop_last_batch=False, threads=1, readahead=0
+        )
+    )
+    get_batch_len = lambda batch: len(batch[list(batch.keys())[0]])
+    batch_lens = [get_batch_len(batch) for batch in batches]
+
+    # Check the batch lengths are correct
+    assert len(batches) == total_rows // 5 + (1 if total_rows % 5 != 0 else 0)
+    assert all([batch_len == 5 for batch_len in batch_lens[:-1]])
+    assert batch_lens[-1] == (total_rows % 5 if total_rows % 5 != 0 else 5)
+    assert sum(batch_lens) == total_rows
+
+    # Check the batch data is correct
+    dicts = [tbl_view[:] for tbl_view in tbl_views]
+    dict_all = {
+        k: np.concatenate([d[k] for d in dicts], axis=0) for k in dicts[0].keys()
+    }
+    for i, batch in enumerate(batches):
+        for k in batch.keys():
+            np.testing.assert_array_equal(
+                batch[k], dict_all[k][i * 5 : (i + 1) * 5], strict=True
+            )
+
+
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
 def test_select_columns(tbl_view, request):
     tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
