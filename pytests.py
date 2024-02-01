@@ -536,6 +536,27 @@ def test_concat_batch_iter_concat_no_drop_last(concatable_tbl_views, request):
             )
 
 
+def test_concat_batch_iter_tons_of_threads():
+    vals = np.arange(100_000)
+    tbl_dicts = [{"vals": vals[i : i + 100]} for i in range(0, 100_000, 100)]
+    tbl_views = [infinidata.TableView(tbl_dict) for tbl_dict in tbl_dicts]
+
+    batches = list(infinidata.TableView.batch_iter_concat(tbl_views, batch_size=33, drop_last_batch=False, threads=3000, readahead=10_000))
+    get_batch_len = lambda batch: len(batch[list(batch.keys())[0]])
+
+    # Check the batch lengths are correct
+    assert len(batches) == 3031
+    assert all([get_batch_len(batch) == 33 for batch in batches[:-1]])
+    assert get_batch_len(batches[-1]) == 10
+
+    # Concatenate the batches
+    batch_arrs = [batch["vals"] for batch in batches]
+    batch_arr = np.concatenate(batch_arrs, axis=0)
+
+    assert batch_arr.shape == (100_000,)
+    np.testing.assert_array_equal(batch_arr, vals, strict=True)
+
+
 @pytest.mark.parametrize("tbl_view", ["tbl_view_1", "tbl_view_2", "tbl_view_3"])
 def test_select_columns(tbl_view, request):
     tbl_view, tbl_dict = request.getfixturevalue(tbl_view)
