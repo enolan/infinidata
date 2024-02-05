@@ -1636,7 +1636,12 @@ fn table_desc_and_columns_from_dict(
     let mut column_descs = Vec::with_capacity(column_cnt);
     let mut column_storages = Vec::with_capacity(column_cnt);
     let mut data_len = None;
-    for (key, value) in dict.iter() {
+
+    // Normalize column order. Otherwise concat can break.
+    let keys = dict.keys();
+    keys.sort()?;
+    for key in keys.iter() {
+        let value = dict.get_item(key).unwrap().unwrap();
         let key = key.extract::<String>()?;
         let value = value.downcast::<PyUntypedArray>()?;
         let dtype = dtype_from_pyarray(py, value)?;
