@@ -140,6 +140,7 @@ enum IndexMapping {
 /// by subscripting with []: tv[5] gets row 5, tv[2:5] gets rows 2, 3, and 4, and
 /// tv[np.array([1, 3, 5])] gets rows 1, 3, and 5. You can also use a slice with a step size:
 /// tv[1:10:2] gets rows 1, 3, 5, 7, and 9.
+/// Fetching a range releases the GIL temporarily, the other subscripting methods do not.
 #[pyclass(name = "TableView")]
 struct TableViewPy {
     view: Arc<TableViewMem>,
@@ -283,35 +284,65 @@ impl TableViewPy {
             // This has the Python semantics where getting a slice is never out of bounds, even if
             // your bounds go past the end of the array. You do get an exception if you try to
             // specify a step size of 0 though.
-            for (col, col_desc) in column_descs {
+            let mut storage = HashMap::with_capacity(column_descs.len());
+            index.py().allow_threads(|| {
+                for (col, col_desc) in &column_descs {
+                    let col_name = col_desc.name.to_string();
+                    match col_desc.dtype {
+                        ArchivedDType::F32 => {
+                            let iter = self.get_f32_column_range(*col, &slice_idxs);
+                            storage.insert(col_name, ColumnStorage::F32(Vec::from_iter(iter)));
+                        }
+                        ArchivedDType::I32 => {
+                            let iter = self.get_i32_column_range(*col, &slice_idxs);
+                            storage.insert(col_name, ColumnStorage::I32(Vec::from_iter(iter)));
+                        }
+                        ArchivedDType::I64 => {
+                            let iter = self.get_i64_column_range(*col, &slice_idxs);
+                            storage.insert(col_name, ColumnStorage::I64(Vec::from_iter(iter)));
+                        }
+                        ArchivedDType::UString => {
+                            let iter = self.get_string_column_range(*col, &slice_idxs);
+                            let strings = iter.collect::<Vec<String>>();
+                            storage.insert(col_name, ColumnStorage::UString(strings));
+                        }
+                    };
+                }
+            });
+
+            let out = PyDict::new(index.py());
+
+            for (_col, col_desc) in column_descs {
                 let col_name = col_desc.name.to_string();
-                let arr: &PyUntypedArray = match col_desc.dtype {
-                    ArchivedDType::F32 => {
-                        let iter = self.get_f32_column_range(col, &slice_idxs);
-                        np::PyArray::from_iter(py, iter).downcast().unwrap()
-                    }
-                    ArchivedDType::I32 => {
-                        let iter = self.get_i32_column_range(col, &slice_idxs);
-                        np::PyArray::from_iter(py, iter).downcast().unwrap()
-                    }
-                    ArchivedDType::I64 => {
-                        let iter = self.get_i64_column_range(col, &slice_idxs);
-                        np::PyArray::from_iter(py, iter).downcast().unwrap()
-                    }
-                    ArchivedDType::UString => {
-                        let iter = self.get_string_column_range(col, &slice_idxs);
-                        let strings = iter.collect::<Vec<String>>();
-                        let string_list = PyList::new(py, strings);
-                        let np = py.import(intern!(py, "numpy")).unwrap();
-                        let fun = np.getattr(intern!(py, "array")).unwrap();
-                        fun.call1((string_list,)).unwrap().downcast().unwrap()
-                    }
-                };
                 let out_dims = std::iter::once(slice_idxs.slicelength as usize)
                     .chain(col_desc.dims.iter().map(|&d| d as usize))
                     .collect::<Vec<usize>>();
-                let arr = reshape_pyuntypedarray(py, arr, &out_dims).unwrap();
-                out.set_item(col_name, arr).unwrap();
+                match storage.get(&col_name).unwrap() {
+                    ColumnStorage::F32(data) => {
+                        let arr = np::PyArray::from_slice(index.py(), data);
+                        let arr = reshape_pyuntypedarray(index.py(), arr, &out_dims).unwrap();
+                        out.set_item(col_name, arr).unwrap();
+                    }
+                    ColumnStorage::I32(data) => {
+                        let arr = np::PyArray::from_slice(index.py(), data);
+                        let arr = reshape_pyuntypedarray(index.py(), arr, &out_dims).unwrap();
+                        out.set_item(col_name, arr).unwrap();
+                    }
+                    ColumnStorage::I64(data) => {
+                        let arr = np::PyArray::from_slice(index.py(), data);
+                        let arr = reshape_pyuntypedarray(index.py(), arr, &out_dims).unwrap();
+                        out.set_item(col_name, arr).unwrap();
+                    }
+                    ColumnStorage::UString(data) => {
+                        let string_list =
+                            PyList::new(index.py(), data.iter().map(|s| s.to_string()));
+                        let np = index.py().import(intern!(index.py(), "numpy")).unwrap();
+                        let fun = np.getattr(intern!(index.py(), "array")).unwrap();
+                        let arr = fun.call1((string_list,)).unwrap().downcast().unwrap();
+                        let arr = reshape_pyuntypedarray(index.py(), arr, &out_dims).unwrap();
+                        out.set_item(col_name, arr).unwrap();
+                    }
+                }
             }
             Ok(out.into())
         } else if let Ok(idx_array) = index.downcast::<PyArray1<i64>>() {
