@@ -2243,7 +2243,7 @@ mod mmap_archived {
                 .canonicalize()
                 .map_err(|e| format!("Error canonicalizing path: {}", e))?;
             let mmap =
-                unsafe { Mmap::map(&file).map_err(|e| format!("Error mmaping file: {}", e))? };
+                unsafe { Mmap::map(&file).map_err(|e| format!("Error mmaping file: {}. Increasing vm.max_map_count may help.", e))? };
             // There are situations where skipping the check is valid, if profiling shows it
             // matters, we can add an unsafe function to skip the check.
             let check_res = check_archived_root::<T>(&mmap[..]);
