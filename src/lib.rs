@@ -2022,11 +2022,17 @@ impl BatchIter {
     }
 
     fn __next__(&mut self, py: Python<'_>) -> Option<Py<PyDict>> {
-        match self.result_queue_recv.recv() {
-            Ok(mvar) => {
-                // There is at least one batch currently being processed.
-                let (batch, batch_size): (HashMap<usize, ColumnStorage>, usize) =
-                    mvar.take().unwrap();
+        // Release the GIL while waiting for the next batch to be ready
+        let mvar_contents = py.allow_threads(|| {
+            match self.result_queue_recv.recv() {
+                // There is at least one batch currently being processed. Wait for it to be ready.
+                Ok(mvar) => Some(mvar.take().ok()),
+                // Result queue is closed, meaning there are no more batches to get
+                Err(_) => None,
+            }
+        });
+        match mvar_contents {
+            Some(Some((batch, batch_size))) => {
                 let dict = PyDict::new(py);
                 for (col, storage) in batch {
                     let arr: &PyUntypedArray = match storage {
@@ -2053,14 +2059,12 @@ impl BatchIter {
                     let arr = reshape_pyuntypedarray(py, arr, &out_dims).unwrap();
                     dict.set_item(col_desc.name.to_string(), arr).unwrap();
                 }
-
                 Some(dict.into())
             }
-            Err(_) => {
-                // Result queue has been dropped, which means the work queue filler thread exited
-                // and there are no more batches to fetch.
-                None
+            Some(None) => {
+                panic!("Error taking from MVar, fetcher thread died?");
             }
+            None => None,
         }
     }
 }
