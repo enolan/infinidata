@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+<meta name="generator" content="pdoc 0.10.0" />
+<title>infinidata.infinidata API documentation</title>
+<meta name="description" content="Our top level module" />
+<link rel="preload stylesheet" as="style" href="https://cdnjs.cloudflare.com/ajax/libs/10up-sanitize.css/11.0.1/sanitize.min.css" integrity="sha256-PK9q560IAAa6WVRRh76LtCaI8pjTJ2z11v0miyNNjrs=" crossorigin>
+<link rel="preload stylesheet" as="style" href="https://cdnjs.cloudflare.com/ajax/libs/10up-sanitize.css/11.0.1/typography.min.css" integrity="sha256-7l/o7C8jubJiy74VsKTidCy1yBkRtiUGbVkYBylBqUg=" crossorigin>
+<link rel="stylesheet preload" as="style" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.1.1/styles/github.min.css" crossorigin>
+<style>:root{--highlight-color:#fe9}.flex{display:flex !important}body{line-height:1.5em}#content{padding:20px}#sidebar{padding:30px;overflow:hidden}#sidebar > *:last-child{margin-bottom:2cm}.http-server-breadcrumbs{font-size:130%;margin:0 0 15px 0}#footer{font-size:.75em;padding:5px 30px;border-top:1px solid #ddd;text-align:right}#footer p{margin:0 0 0 1em;display:inline-block}#footer p:last-child{margin-right:30px}h1,h2,h3,h4,h5{font-weight:300}h1{font-size:2.5em;line-height:1.1em}h2{font-size:1.75em;margin:1em 0 .50em 0}h3{font-size:1.4em;margin:25px 0 10px 0}h4{margin:0;font-size:105%}h1:target,h2:target,h3:target,h4:target,h5:target,h6:target{background:var(--highlight-color);padding:.2em 0}a{color:#058;text-decoration:none;transition:color .3s ease-in-out}a:hover{color:#e82}.title code{font-weight:bold}h2[id^="header-"]{margin-top:2em}.ident{color:#900}pre code{background:#f8f8f8;font-size:.8em;line-height:1.4em}code{background:#f2f2f1;padding:1px 4px;overflow-wrap:break-word}h1 code{background:transparent}pre{background:#f8f8f8;border:0;border-top:1px solid #ccc;border-bottom:1px solid #ccc;margin:1em 0;padding:1ex}#http-server-module-list{display:flex;flex-flow:column}#http-server-module-list div{display:flex}#http-server-module-list dt{min-width:10%}#http-server-module-list p{margin-top:0}.toc ul,#index{list-style-type:none;margin:0;padding:0}#index code{background:transparent}#index h3{border-bottom:1px solid #ddd}#index ul{padding:0}#index h4{margin-top:.6em;font-weight:bold}@media (min-width:200ex){#index .two-column{column-count:2}}@media (min-width:300ex){#index .two-column{column-count:3}}dl{margin-bottom:2em}dl dl:last-child{margin-bottom:4em}dd{margin:0 0 1em 3em}#header-classes + dl > dd{margin-bottom:3em}dd dd{margin-left:2em}dd p{margin:10px 0}.name{background:#eee;font-weight:bold;font-size:.85em;padding:5px 10px;display:inline-block;min-width:40%}.name:hover{background:#e0e0e0}dt:target .name{background:var(--highlight-color)}.name > span:first-child{white-space:nowrap}.name.class > span:nth-child(2){margin-left:.4em}.inherited{color:#999;border-left:5px solid #eee;padding-left:1em}.inheritance em{font-style:normal;font-weight:bold}.desc h2{font-weight:400;font-size:1.25em}.desc h3{font-size:1em}.desc dt code{background:inherit}.source summary,.git-link-div{color:#666;text-align:right;font-weight:400;font-size:.8em;text-transform:uppercase}.source summary > *{white-space:nowrap;cursor:pointer}.git-link{color:inherit;margin-left:1em}.source pre{max-height:500px;overflow:auto;margin:0}.source pre code{font-size:12px;overflow:visible}.hlist{list-style:none}.hlist li{display:inline}.hlist li:after{content:',\2002'}.hlist li:last-child:after{content:none}.hlist .hlist{display:inline;padding-left:1em}img{max-width:100%}td{padding:0 .5em}.admonition{padding:.1em .5em;margin-bottom:1em}.admonition-title{font-weight:bold}.admonition.note,.admonition.info,.admonition.important{background:#aef}.admonition.todo,.admonition.versionadded,.admonition.tip,.admonition.hint{background:#dfd}.admonition.warning,.admonition.versionchanged,.admonition.deprecated{background:#fd4}.admonition.error,.admonition.danger,.admonition.caution{background:lightpink}</style>
+<style media="screen and (min-width: 700px)">@media screen and (min-width:700px){#sidebar{width:30%;height:100vh;overflow:auto;position:sticky;top:0}#content{width:70%;max-width:100ch;padding:3em 4em;border-left:1px solid #ddd}pre code{font-size:1em}.item .name{font-size:1em}main{display:flex;flex-direction:row-reverse;justify-content:flex-end}.toc ul ul,#index ul{padding-left:1.5em}.toc > ul > li{margin-top:.5em}}</style>
+<style media="print">@media print{#sidebar h1{page-break-before:always}.source{display:none}}@media print{*{background:transparent !important;color:#000 !important;box-shadow:none !important;text-shadow:none !important}a[href]:after{content:" (" attr(href) ")";font-size:90%}a[href][title]:after{content:none}abbr[title]:after{content:" (" attr(title) ")"}.ir a:after,a[href^="javascript:"]:after,a[href^="#"]:after{content:""}pre,blockquote{border:1px solid #999;page-break-inside:avoid}thead{display:table-header-group}tr,img{page-break-inside:avoid}img{max-width:100% !important}@page{margin:0.5cm}p,h2,h3{orphans:3;widows:3}h1,h2,h3,h4,h5,h6{page-break-after:avoid}}</style>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.1.1/highlight.min.js" integrity="sha256-Uv3H6lx7dJmRfRvH8TH6kJD1TSK1aFcwgx+mdg3epi8=" crossorigin></script>
+<script>window.addEventListener('DOMContentLoaded', () => hljs.initHighlighting())</script>
+</head>
+<body>
+<main>
+<article id="content">
+<header>
+<h1 class="title">Module <code>infinidata.infinidata</code></h1>
+</header>
+<section id="section-intro">
+<p>Our top level module</p>
+</section>
+<section>
+</section>
+<section>
+</section>
+<section>
+</section>
+<section>
+<h2 class="section-title" id="header-classes">Classes</h2>
+<dl>
+<dt id="infinidata.infinidata.TableView"><code class="flex name class">
+<span>class <span class="ident">TableView</span></span>
+<span>(</span><span>dict)</span>
+</code></dt>
+<dd>
+<div class="desc"><p>A view into a table. A table is a collection of columns, each of which has a name along with a
+dtype and a shape for the entries. E.g.:</p>
+<pre><code>tbl_dict = {
+  &quot;foo&quot;: np.arange(45*16*2, dtype=np.float32).reshape((45,16,2)),
+  &quot;bar&quot;: np.arange(45, dtype=np.int64),
+  &quot;baz&quot;: np.array([&quot;hello&quot;] * 45)
+}
+tbl = infinidata.TableView(tbl_dict)
+</code></pre>
+<p>Here, <code>tbl_dict</code> is a dictionary mapping column names to NumPy arrays. We use it to construct a
+TableView. The columns are "foo", "bar", and "baz", with dtypes <code>float32</code>, <code>int64</code>, and string,
+and shapes <code>(16, 2)</code>, <code>()</code>, and <code>()</code> respectively. The table has 45 rows. The rows of a
+TableView can be accessed by subscripting with <code>[]</code>: <code>tv[5]</code> gets row 5, <code>tv[2:5]</code> gets rows 2,
+3, and 4, and <code>tv[np.array([1, 3, 5])]</code> gets rows 1, 3, and 5. You can also use a slice with a
+step size: <code>tv[1:10:2]</code> gets rows 1, 3, 5, 7, and 9.
+Fetching a range releases the GIL temporarily, the other subscripting methods do not.</p></div>
+<h3>Static methods</h3>
+<dl>
+<dt id="infinidata.infinidata.TableView.batch_iter_concat"><code class="name flex">
+<span>def <span class="ident">batch_iter_concat</span></span>(<span>views, batch_size, drop_last_batch=False, threads=1, readahead=0)</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Iterate over the rows of list of <code><a title="infinidata.infinidata.TableView" href="#infinidata.infinidata.TableView">TableView</a></code>s in order, without creating a new view.</p></div>
+</dd>
+<dt id="infinidata.infinidata.TableView.concat"><code class="name flex">
+<span>def <span class="ident">concat</span></span>(<span>views)</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Concatenate multiple <code><a title="infinidata.infinidata.TableView" href="#infinidata.infinidata.TableView">TableView</a></code>s together</p></div>
+</dd>
+<dt id="infinidata.infinidata.TableView.load_from_disk"><code class="name flex">
+<span>def <span class="ident">load_from_disk</span></span>(<span>dir, filename)</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Load a <code><a title="infinidata.infinidata.TableView" href="#infinidata.infinidata.TableView">TableView</a></code> from disk. Provide a directory and a name, and the TableView along with
+its dependencies will be mapped. <strong>THE INFINIDATA DISK FORMAT IS NOT STABLE.</strong></p></div>
+</dd>
+</dl>
+<h3>Methods</h3>
+<dl>
+<dt id="infinidata.infinidata.TableView.batch_iter"><code class="name flex">
+<span>def <span class="ident">batch_iter</span></span>(<span>self, /, batch_size, drop_last_batch=False, threads=1, readahead=0)</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Iterate over the rows of a <code><a title="infinidata.infinidata.TableView" href="#infinidata.infinidata.TableView">TableView</a></code> in batches.
+The <code>threads</code> and <code>readahead</code> parameters can speed up loading at the expense of memory usage.</p>
+<p>Parameters:</p>
+<ul>
+<li><code>batch_size</code>: The number of rows in each batch</li>
+<li><code>drop_last_batch</code>: If true, the last batch will be dropped if it's smaller than
+<code>batch_size</code></li>
+<li><code>threads</code>: The number of threads to use for parallel loading. Must be at least 1, and less
+than or equal to <code>readahead</code>, unless <code>readahead</code> is 0.</li>
+<li><code>readahead</code>: The maximum number of batches to load ahead of time. Setting this to at least
+1 will make data loading asynchronous with your python code that is consuming the iterator</li>
+<li>batches will start being loaded as soon as the iterator is created, and will continue
+being loaded so long as there is space in the readahead buffer.</li>
+</ul></div>
+</dd>
+<dt id="infinidata.infinidata.TableView.new_view"><code class="name flex">
+<span>def <span class="ident">new_view</span></span>(<span>self, /, mapping)</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Make a new TableView from an existing one, remapping the indices either using an index
+array or a range. E.g.:</p>
+<pre><code>tv = infinidata.TableView({&quot;foo&quot;: np.arange(45, dtype=np.int64)})
+tv2 = tv.new_view(np.array([1, 3, 5]))
+tv3 = tv.new_view(slice(1, 10, 2))
+tv4 = tv.new_view(slice(None, None, -1))
+</code></pre>
+<p>tv2 is a new view with the 1st, 3rd, and 5th rows of tv. The slice function is equivalent
+the [start:stop:step] notation used when subscripting. tv3 is a new view with the 1st, 3rd,
+5th, 7th, and 9th rows of tv. tv4 is a new view with the rows of tv in reverse order.</p></div>
+</dd>
+<dt id="infinidata.infinidata.TableView.remove_matching_strings"><code class="name flex">
+<span>def <span class="ident">remove_matching_strings</span></span>(<span>self, /, column, strings_to_remove)</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Remove rows from the table where a given string column matches an element of a given set.
+This materializes the full set of retained indices in memory, so it's not suitable for
+obscenely large numbers of rows. An offline approach is possible, but not implemented.</p></div>
+</dd>
+<dt id="infinidata.infinidata.TableView.save_to_disk"><code class="name flex">
+<span>def <span class="ident">save_to_disk</span></span>(<span>self, /, dir, filename=None)</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Save a <code><a title="infinidata.infinidata.TableView" href="#infinidata.infinidata.TableView">TableView</a></code> to disk. The <code><a title="infinidata.infinidata.TableView" href="#infinidata.infinidata.TableView">TableView</a></code> along with all its dependencies will be
+hardlinked (or copied if the original backing storage is on a different fs) in the
+destination directory. This is smart enough to avoid duplicating data if you use the same
+directory multiple times, so if you save two TableViews that share a backing storage, the
+storage will only be saved once. Of course, if they're on the same fs then hardlinking
+prevents duplication anyway.</p>
+<p><strong>THE INFINIDATA DISK FORMAT IS NOT STABLE</strong>. This function exists for caching, not
+permanent storage. If you want to save data permanently, use a different format.</p>
+<p>Parameters:</p>
+<ul>
+<li><code>dir</code>: The directory to save the <code><a title="infinidata.infinidata.TableView" href="#infinidata.infinidata.TableView">TableView</a></code> and its dependencies in. Directories can be
+reused across different <code><a title="infinidata.infinidata.TableView" href="#infinidata.infinidata.TableView">TableView</a></code>s, doing this will prevent redundant copies.</li>
+<li><code>filename</code>: The name of the file to save the <code><a title="infinidata.infinidata.TableView" href="#infinidata.infinidata.TableView">TableView</a></code> in. If a name isn't provided
+you'll just get a bunch of files named by UUID and you'll have a hard time finding what
+you're looking for.</li>
+</ul></div>
+</dd>
+<dt id="infinidata.infinidata.TableView.select_columns"><code class="name flex">
+<span>def <span class="ident">select_columns</span></span>(<span>self, /, columns)</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Select the columns to be viewed, returning a new <code><a title="infinidata.infinidata.TableView" href="#infinidata.infinidata.TableView">TableView</a></code>. Subscripting the <code><a title="infinidata.infinidata.TableView" href="#infinidata.infinidata.TableView">TableView</a></code>
+and using <code>batch_iter</code> will return dicts with only those columns. Can improve performance by
+doing less reading if you're only using some of the columns</p></div>
+</dd>
+<dt id="infinidata.infinidata.TableView.shuffle"><code class="name flex">
+<span>def <span class="ident">shuffle</span></span>(<span>self, /, seed=None)</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Shuffle the rows of a <code><a title="infinidata.infinidata.TableView" href="#infinidata.infinidata.TableView">TableView</a></code>. N.b. this will use enough memory to make a complete index
+array. An offline approach is possible and maybe necessary if you have an absurd number of
+rows, but not implemented yet. The memory is freed after the shuffle is complete - the
+generated index array is stored on disk.</p></div>
+</dd>
+<dt id="infinidata.infinidata.TableView.uuid"><code class="name flex">
+<span>def <span class="ident">uuid</span></span>(<span>self, /)</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Get the UUID of the TableView</p></div>
+</dd>
+</dl>
+</dd>
+</dl>
+</section>
+</article>
+<nav id="sidebar">
+<h1>Index</h1>
+<div class="toc">
+<ul></ul>
+</div>
+<ul id="index">
+<li><h3>Super-module</h3>
+<ul>
+<li><code><a title="infinidata" href="index.html">infinidata</a></code></li>
+</ul>
+</li>
+<li><h3><a href="#header-classes">Classes</a></h3>
+<ul>
+<li>
+<h4><code><a title="infinidata.infinidata.TableView" href="#infinidata.infinidata.TableView">TableView</a></code></h4>
+<ul class="">
+<li><code><a title="infinidata.infinidata.TableView.batch_iter" href="#infinidata.infinidata.TableView.batch_iter">batch_iter</a></code></li>
+<li><code><a title="infinidata.infinidata.TableView.batch_iter_concat" href="#infinidata.infinidata.TableView.batch_iter_concat">batch_iter_concat</a></code></li>
+<li><code><a title="infinidata.infinidata.TableView.concat" href="#infinidata.infinidata.TableView.concat">concat</a></code></li>
+<li><code><a title="infinidata.infinidata.TableView.load_from_disk" href="#infinidata.infinidata.TableView.load_from_disk">load_from_disk</a></code></li>
+<li><code><a title="infinidata.infinidata.TableView.new_view" href="#infinidata.infinidata.TableView.new_view">new_view</a></code></li>
+<li><code><a title="infinidata.infinidata.TableView.remove_matching_strings" href="#infinidata.infinidata.TableView.remove_matching_strings">remove_matching_strings</a></code></li>
+<li><code><a title="infinidata.infinidata.TableView.save_to_disk" href="#infinidata.infinidata.TableView.save_to_disk">save_to_disk</a></code></li>
+<li><code><a title="infinidata.infinidata.TableView.select_columns" href="#infinidata.infinidata.TableView.select_columns">select_columns</a></code></li>
+<li><code><a title="infinidata.infinidata.TableView.shuffle" href="#infinidata.infinidata.TableView.shuffle">shuffle</a></code></li>
+<li><code><a title="infinidata.infinidata.TableView.uuid" href="#infinidata.infinidata.TableView.uuid">uuid</a></code></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</nav>
+</main>
+<footer id="footer">
+<p>Generated by <a href="https://pdoc3.github.io/pdoc" title="pdoc: Python API documentation generator"><cite>pdoc</cite> 0.10.0</a>.</p>
+</footer>
+</body>
+</html>
