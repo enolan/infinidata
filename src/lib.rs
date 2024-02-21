@@ -127,19 +127,21 @@ enum IndexMapping {
 /// A view into a table. A table is a collection of columns, each of which has a name along with a
 /// dtype and a shape for the entries. E.g.:
 ///
+/// ```
 /// tbl_dict = {
 ///   "foo": np.arange(45*16*2, dtype=np.float32).reshape((45,16,2)),
 ///   "bar": np.arange(45, dtype=np.int64),
 ///   "baz": np.array(["hello"] * 45)
 /// }
 /// tbl = infinidata.TableView(tbl_dict)
+/// ```
 ///
-/// Here, tbl_dict is a dictionary mapping column names to NumPy arrays. We use it to construct
-/// a TableView. The columns are "foo", "bar", and "baz", with dtypes float32, int64, and string,
-/// and shapes (16, 2), (), and (). The table has 45 rows. The rows of a TableView can be accessed
-/// by subscripting with []: tv[5] gets row 5, tv[2:5] gets rows 2, 3, and 4, and
-/// tv[np.array([1, 3, 5])] gets rows 1, 3, and 5. You can also use a slice with a step size:
-/// tv[1:10:2] gets rows 1, 3, 5, 7, and 9.
+/// Here, `tbl_dict` is a dictionary mapping column names to NumPy arrays. We use it to construct a
+/// TableView. The columns are "foo", "bar", and "baz", with dtypes `float32`, `int64`, and string,
+/// and shapes `(16, 2)`, `()`, and `()` respectively. The table has 45 rows. The rows of a
+/// TableView can be accessed by subscripting with `[]`: `tv[5]` gets row 5, `tv[2:5]` gets rows 2,
+/// 3, and 4, and `tv[np.array([1, 3, 5])]` gets rows 1, 3, and 5. You can also use a slice with a
+/// step size: `tv[1:10:2]` gets rows 1, 3, 5, 7, and 9.
 /// Fetching a range releases the GIL temporarily, the other subscripting methods do not.
 #[pyclass(name = "TableView")]
 struct TableViewPy {
@@ -414,7 +416,7 @@ impl TableViewPy {
         (**self).view.uuid.to_string()
     }
 
-    /// Concatenate multiple TableViews together
+    /// Concatenate multiple `TableView`s together
     #[staticmethod]
     fn concat(views: &PyList) -> PyResult<Self> {
         if views.is_empty() {
@@ -467,10 +469,12 @@ impl TableViewPy {
     /// Make a new TableView from an existing one, remapping the indices either using an index
     /// array or a range. E.g.:
     ///
+    /// ```
     /// tv = infinidata.TableView({"foo": np.arange(45, dtype=np.int64)})
     /// tv2 = tv.new_view(np.array([1, 3, 5]))
     /// tv3 = tv.new_view(slice(1, 10, 2))
     /// tv4 = tv.new_view(slice(None, None, -1))
+    /// ```
     ///
     /// tv2 is a new view with the 1st, 3rd, and 5th rows of tv. The slice function is equivalent
     /// the [start:stop:step] notation used when subscripting. tv3 is a new view with the 1st, 3rd,
@@ -536,10 +540,10 @@ impl TableViewPy {
         }
     }
 
-    /// Shuffles the rows of a TableView. N.b. this will use enough memory to make a complete
-    /// index array. An offline approach is possible if you have an absurd number of rows, but not
-    /// implemented. The memory is freed after the shuffle is complete - the generated index array
-    /// is stored on disk.
+    /// Shuffle the rows of a `TableView`. N.b. this will use enough memory to make a complete index
+    /// array. An offline approach is possible and maybe necessary if you have an absurd number of
+    /// rows, but not implemented yet. The memory is freed after the shuffle is complete - the
+    /// generated index array is stored on disk.
     fn shuffle(&self, seed: Option<u64>) -> PyResult<Self> {
         let indices: &mut [usize] = &mut (0..self.len()).collect::<Vec<usize>>();
         match seed {
@@ -571,17 +575,20 @@ impl TableViewPy {
         })
     }
 
-    /// Iterate over the rows of a TableView in batches.
-    /// The threads and readahead parameters can speed up loading at the expense of memory usage.
-    /// batch_size: The number of rows in each batch
-    /// drop_last_batch: If true, the last batch will be dropped if it's smaller than batch_size
-    /// threads: The number of threads to use for parallel loading. Must be at least 1, and less
-    ///          than or equal to readahead, unless readahead is 0.
-    /// readahead: The maximum number of batches to load ahead of time. Setting this to at least
-    ///            1 will make data loading asynchronous with your python code that is consuming
-    ///            the iterator - batches will start being loaded as soon as the iterator is
-    ///            created, and will continue being loaded so long as there is space in the
-    ///            readahead buffer.
+    /// Iterate over the rows of a `TableView` in batches.
+    /// The `threads` and `readahead` parameters can speed up loading at the expense of memory usage.
+    ///
+    /// Parameters:
+    ///
+    /// - `batch_size`: The number of rows in each batch
+    /// - `drop_last_batch`: If true, the last batch will be dropped if it's smaller than
+    ///   `batch_size`
+    /// - `threads`: The number of threads to use for parallel loading. Must be at least 1, and less
+    ///   than or equal to `readahead`, unless `readahead` is 0.
+    /// - `readahead`: The maximum number of batches to load ahead of time. Setting this to at least
+    ///   1 will make data loading asynchronous with your python code that is consuming the iterator
+    ///   - batches will start being loaded as soon as the iterator is created, and will continue
+    ///   being loaded so long as there is space in the readahead buffer.
     #[pyo3(signature = (batch_size, drop_last_batch=false, threads=1, readahead=0))]
     fn batch_iter(
         &self,
@@ -625,7 +632,7 @@ impl TableViewPy {
         ))
     }
 
-    /// Iterate over the rows of list of TableViews in order, without creating a new view.
+    /// Iterate over the rows of list of `TableView`s in order, without creating a new view.
     #[staticmethod]
     #[pyo3(signature = (views, batch_size, drop_last_batch=false, threads=1, readahead=0))]
     fn batch_iter_concat(
@@ -683,8 +690,9 @@ impl TableViewPy {
         ))
     }
 
-    /// Select the columns to be viewed, returning a new TableView. Subscripting the TableView and
-    /// using batch_iter will return dicts with only those columns.
+    /// Select the columns to be viewed, returning a new `TableView`. Subscripting the `TableView`
+    /// and using `batch_iter` will return dicts with only those columns. Can improve performance by
+    /// doing less reading if you're only using some of the columns
     fn select_columns(&self, columns: &PySet) -> PyResult<Self> {
         let mut live_columns = Vec::new();
         for col in columns.iter() {
@@ -775,13 +783,24 @@ impl TableViewPy {
         })
     }
 
-    /// Save a TableView to disk. Provide a directory and a name, and the TableView along with all
-    /// its dependencies will be hardlinked (or copied if the original backing storage is on a
-    /// different fs) in that directory. This is smart enough to avoid duplicating data, so if you
-    /// save two TableViews that share a backing storage, the storage will only be saved once.
+    /// Save a `TableView` to disk. The `TableView` along with all its dependencies will be
+    /// hardlinked (or copied if the original backing storage is on a different fs) in the
+    /// destination directory. This is smart enough to avoid duplicating data if you use the same
+    /// directory multiple times, so if you save two TableViews that share a backing storage, the
+    /// storage will only be saved once. Of course, if they're on the same fs then hardlinking
+    /// prevents duplication anyway.
     ///
-    /// THE INFINIDATA DISK FORMAT IS NOT STABLE. This function exists for caching, not permanent
-    /// storage. If you want to save data permanently, use a different format.
+    /// **THE INFINIDATA DISK FORMAT IS NOT STABLE**. This function exists for caching, not
+    /// permanent storage. If you want to save data permanently, use a different format.
+    ///
+    /// Parameters:
+    ///
+    /// - `dir`: The directory to save the `TableView` and its dependencies in. Directories can be
+    ///   reused across different `TableView`s, doing this will prevent redundant copies.
+    /// - `filename`: The name of the file to save the `TableView` in. If a name isn't provided
+    ///   you'll just get a bunch of files named by UUID and you'll have a hard time finding what
+    ///   you're looking for.
+
     fn save_to_disk(&self, dir: PathBuf, filename: Option<PathBuf>) -> PyResult<()> {
         match fs::create_dir_all(&dir) {
             Ok(_) => {}
@@ -855,8 +874,8 @@ impl TableViewPy {
         Ok(())
     }
 
-    /// Load a TableView from disk. Provide a directory and a name, and the TableView along with
-    /// its dependencies will be mapped. Again, THE INFINIDATA DISK FORMAT IS NOT STABLE.
+    /// Load a `TableView` from disk. Provide a directory and a name, and the TableView along with
+    /// its dependencies will be mapped. **THE INFINIDATA DISK FORMAT IS NOT STABLE.**
     #[staticmethod]
     fn load_from_disk(dir: PathBuf, filename: PathBuf) -> PyResult<Self> {
         let uuid_path = dir.join(filename);
