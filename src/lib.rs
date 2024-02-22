@@ -207,9 +207,9 @@ impl TableViewMem {
 #[pymethods]
 impl TableViewPy {
     #[new]
-    fn new(dict: &PyDict) -> Self {
+    fn new(dict: &PyDict) -> PyResult<Self> {
         let py = dict.py();
-        let (desc, storage) = table_desc_and_columns_from_dict(py, dict).unwrap(); // FIXME result
+        let (desc, storage) = table_desc_and_columns_from_dict(py, dict)?;
         let view = TableView {
             uuid: Uuid::new_v4(),
             desc_uuid: desc.uuid,
@@ -217,7 +217,7 @@ impl TableViewPy {
         };
         let view_archived = unsafe { make_mmapped(&view) };
         let ncols = desc.columns.len();
-        TableViewPy {
+        Ok(TableViewPy {
             view: Arc::new(TableViewMem {
                 view: Arc::new(view_archived),
                 desc: Arc::new(desc),
@@ -226,7 +226,7 @@ impl TableViewPy {
                 referenced_view: None,
                 live_columns: (0..ncols).collect(),
             }),
-        }
+        })
     }
 
     #[pyo3(name = "__getitem__")]
