@@ -1,5 +1,7 @@
 # Infinidata
 
+[![PyPI version](https://badge.fury.io/py/infinidata.svg)](https://badge.fury.io/py/infinidata)
+
 Infinidata is a Python library for working with arbitrarily large datasets. The only limit... *is
 your imagination*. And your disk space. And your virtual address space. And your system RAM for
 metadata. But *not* your system RAM for the data itself! Everything gets mmapped.

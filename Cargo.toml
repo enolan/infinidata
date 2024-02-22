@@ -2,7 +2,11 @@ cargo-features = ["profile-rustflags"]
 
 [package]
 name = "infinidata"
-version = "0.0.1-alpha3"
+version = "0.0.1"
+license = "BSD-3-Clause"
+description = "A Python library for transparently working with datasets much larger than memory."
+homepage = "https://github.com/enolan/infinidata"
+documentation = "https://enolan.github.io/infinidata/"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

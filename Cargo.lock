@@ -127,7 +127,7 @@ checksum = "1e186cfbae8084e513daff4240b4797e342f988cecda4fb6c939150f96315fd8"
 
 [[package]]
 name = "infinidata"
-version = "0.0.1-alpha3"
+version = "0.0.1"
 dependencies = [
  "crossbeam-channel",
  "memmap",
