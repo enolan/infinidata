@@ -2,7 +2,9 @@
 
 Infinidata is a Python library for working with arbitrarily large datasets. The only limit... *is
 your imagination*. And your disk space. And your virtual address space. And your system RAM for
-metadata. But not your system RAM for the data itself! Everything gets mmapped.
+metadata. But *not* your system RAM for the data itself! Everything gets mmapped.
+
+The API documentation is [here](https://enolan.github.io/infinidata/).
 
 You can iterate over datasets, in batches if you like. You can take subsets with ranges, do
 arbitrary permutations, concatenate datasets, and shuffle. All without copying the underlying data.
