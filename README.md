@@ -64,5 +64,5 @@ Caveats:
     since I don't have more than 256 TiB of storage or one of the fancy newfangled CPUs, I haven't
     done that yet. Patches welcome, I guess.
   - If you have a table with a ton of indirections there's no way to flatten them and get a new
-    table backed by contiguous memory. You have to write it out to some other format and read it
-    back in. Not super hard to implement, but not implemented.
+    table backed by contiguous memory. You have to round-trip them through another format (though
+    that format can just be NumPy). Having some kind of flattening operation built in would be nice.
